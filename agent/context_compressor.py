@@ -183,6 +183,42 @@ class ContextCompressor(ContextEngine):
     # Tool output pruning (cheap pre-pass, no LLM call)
     # ------------------------------------------------------------------
 
+    # Permission-aware pruning thresholds.
+    # Lower = more aggressive pruning (old read-only results are less critical to keep).
+    # Higher = more conservative (terminal output may affect later decisions).
+    _PRUNE_THRESHOLD_READ = 100       # read-only tools: aggressive (search results, file reads)
+    _PRUNE_THRESHOLD_WRITE = 200      # write/mutating tools: current default
+    _PRUNE_THRESHOLD_DANGEROUS = 500  # dangerous tools: conservative (terminal output)
+
+    def _build_tool_permission_map(self, messages: List[Dict[str, Any]]) -> Dict[str, str]:
+        """Build a mapping from tool_call_id to permission_level.
+
+        Walks assistant messages to find tool_calls, then looks up each
+        tool's permission_level from the registry. Returns a dict mapping
+        tool_call_id → permission_level string for quick lookup during pruning.
+        """
+        permission_map: Dict[str, str] = {}
+        try:
+            from tools.registry import registry as _reg
+        except ImportError:
+            return permission_map
+
+        for msg in messages:
+            if msg.get("role") != "assistant":
+                continue
+            tool_calls = msg.get("tool_calls")
+            if not tool_calls:
+                continue
+            for tc in tool_calls:
+                if not isinstance(tc, dict):
+                    continue
+                tc_id = tc.get("id", "")
+                func = tc.get("function", {})
+                tool_name = func.get("name", "")
+                if tc_id and tool_name:
+                    permission_map[tc_id] = _reg.get_permission_level(tool_name)
+        return permission_map
+
     def _prune_old_tool_results(
         self, messages: List[Dict[str, Any]], protect_tail_count: int,
         protect_tail_tokens: int | None = None,
@@ -195,6 +231,12 @@ class ContextCompressor(ContextEngine):
         When both are given, the token budget takes priority and the message
         count acts as a hard minimum floor.
 
+        Pruning is permission-aware: read-only tool results are pruned more
+        aggressively (threshold 100 chars) since their information is typically
+        consumed by later turns.  Dangerous tool results (terminal) are pruned
+        less aggressively (threshold 500 chars) since they contain execution
+        state that may affect future decisions.
+
         Returns (pruned_messages, pruned_count).
         """
         if not messages:
@@ -202,6 +244,9 @@ class ContextCompressor(ContextEngine):
 
         result = [m.copy() for m in messages]
         pruned = 0
+
+        # Build tool_call_id → permission_level mapping for permission-aware pruning
+        permission_map = self._build_tool_permission_map(messages)
 
         # Determine the prune boundary
         if protect_tail_tokens is not None and protect_tail_tokens > 0:
@@ -233,8 +278,17 @@ class ContextCompressor(ContextEngine):
             content = msg.get("content", "")
             if not content or content == _PRUNED_TOOL_PLACEHOLDER:
                 continue
-            # Only prune if the content is substantial (>200 chars)
-            if len(content) > 200:
+            # Determine pruning threshold based on tool's permission level
+            tool_call_id = msg.get("tool_call_id", "")
+            perm_level = permission_map.get(tool_call_id, "write")
+            if perm_level == "read":
+                threshold = self._PRUNE_THRESHOLD_READ
+            elif perm_level == "dangerous":
+                threshold = self._PRUNE_THRESHOLD_DANGEROUS
+            else:
+                threshold = self._PRUNE_THRESHOLD_WRITE
+
+            if len(content) > threshold:
                 result[i] = {**msg, "content": _PRUNED_TOOL_PLACEHOLDER}
                 pruned += 1
 

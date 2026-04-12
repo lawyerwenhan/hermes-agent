@@ -781,3 +781,174 @@ class TestTokenBudgetTailProtection:
         # Tool at index 2 is outside the protected tail (last 3 = indices 2,3,4)
         # so it might or might not be pruned depending on boundary
         assert isinstance(pruned, int)
+
+
+class TestPermissionAwarePruning:
+    """Tests for permission-level-aware tool result pruning."""
+
+    # Mock registry for predictable permission levels without importing all tools
+    _MOCK_PERMISSIONS = {
+        "read_file": "read",
+        "search_files": "read",
+        "web_search": "read",
+        "terminal": "dangerous",
+        "write_file": "write",
+        "patch": "write",
+    }
+
+    def _make_compressor(self):
+        with patch("agent.context_compressor.get_model_context_length", return_value=100000):
+            return ContextCompressor(
+                model="test/model",
+                threshold_percent=0.85,
+                protect_first_n=2,
+                protect_last_n=2,
+                quiet_mode=True,
+            )
+
+    def _mock_permission_map(self, compressor, messages):
+        """Build permission map using mock registry instead of real one.
+
+        Patches the registry's get_permission_level to use mock permissions,
+        so _build_tool_permission_map works correctly in tests without loading all tools.
+        """
+        mock_registry = MagicMock()
+        mock_registry.get_permission_level = lambda name: self._MOCK_PERMISSIONS.get(name, "write")
+        with patch("agent.context_compressor.registry", mock_registry):
+            return compressor._build_tool_permission_map(messages)
+
+    def _prune_with_mocks(self, compressor, messages, **kwargs):
+        """Run _prune_old_tool_results with mocked registry for permission levels."""
+        mock_registry = MagicMock()
+        mock_registry.get_permission_level = lambda name: self._MOCK_PERMISSIONS.get(name, "write")
+        with patch("tools.registry.registry.get_permission_level", mock_registry.get_permission_level):
+            return compressor._prune_old_tool_results(messages, **kwargs)
+
+    def test_read_tool_pruned_more_aggressively(self):
+        """Read-only tool results (read_file, search_files) are pruned at 100-char threshold."""
+        c = self._make_compressor()
+        messages = [
+            {"role": "system", "content": "You are helpful."},
+            {"role": "user", "content": "Read this file"},
+            {"role": "assistant", "content": None,
+             "tool_calls": [{"id": "call_read", "type": "function",
+                              "function": {"name": "read_file", "arguments": '{"path": "a.txt"}'}}]},
+            # 150 chars — below old 200 threshold but above new 100 read threshold
+            {"role": "tool", "content": "x" * 150, "tool_call_id": "call_read"},
+            {"role": "assistant", "content": "Here's what I found."},
+            {"role": "user", "content": "recent question"},
+            {"role": "assistant", "content": "recent reply"},
+        ]
+        result, pruned = self._prune_with_mocks(c, messages, protect_tail_count=2)
+        # The tool result at index 3 (outside protected tail) should be pruned
+        # because it's 150 chars > 100 (read threshold)
+        assert pruned >= 1
+        assert any(m.get("content") == "[Old tool output cleared to save context space]" for m in result)
+
+    def test_dangerous_tool_pruned_more_conservatively(self):
+        """Terminal output is only pruned at 500-char threshold."""
+        c = self._make_compressor()
+        # 250 chars — above old 200 threshold but below new 500 dangerous threshold
+        content_250 = "x" * 250
+        messages = [
+            {"role": "system", "content": "You are helpful."},
+            {"role": "user", "content": "Run this"},
+            {"role": "assistant", "content": None,
+             "tool_calls": [{"id": "call_term", "type": "function",
+                              "function": {"name": "terminal", "arguments": '{"command": "ls"}'}}]},
+            {"role": "tool", "content": content_250, "tool_call_id": "call_term"},
+            {"role": "assistant", "content": "Done."},
+            {"role": "user", "content": "recent"},
+            {"role": "assistant", "content": "reply"},
+        ]
+        result, pruned = self._prune_with_mocks(c, messages, protect_tail_count=2)
+        # Should NOT be pruned: 250 < 500 (dangerous threshold)
+        assert pruned == 0
+        # Verify the terminal output is preserved
+        tool_msg = [m for m in result if m.get("role") == "tool"][0]
+        assert tool_msg["content"] == content_250
+
+    def test_dangerous_tool_pruned_when_very_long(self):
+        """Terminal output IS pruned when it exceeds 500 chars."""
+        c = self._make_compressor()
+        content_600 = "x" * 600
+        messages = [
+            {"role": "system", "content": "You are helpful."},
+            {"role": "user", "content": "Run this"},
+            {"role": "assistant", "content": None,
+             "tool_calls": [{"id": "call_term2", "type": "function",
+                              "function": {"name": "terminal", "arguments": '{"command": "ls"}'}}]},
+            {"role": "tool", "content": content_600, "tool_call_id": "call_term2"},
+            {"role": "assistant", "content": "Done."},
+            {"role": "user", "content": "recent"},
+            {"role": "assistant", "content": "reply"},
+        ]
+        result, pruned = self._prune_with_mocks(c, messages, protect_tail_count=2)
+        # Should be pruned: 600 > 500 (dangerous threshold)
+        assert pruned == 1
+
+    def test_write_tool_default_threshold(self):
+        """Write tools use the default 200-char threshold (backward compat)."""
+        c = self._make_compressor()
+        # 150 chars — below 200 (write threshold) so should NOT be pruned
+        messages = [
+            {"role": "system", "content": "You are helpful."},
+            {"role": "user", "content": "Write this"},
+            {"role": "assistant", "content": None,
+             "tool_calls": [{"id": "call_write", "type": "function",
+                              "function": {"name": "write_file", "arguments": '{"path": "a.txt"}'}}]},
+            {"role": "tool", "content": "x" * 150, "tool_call_id": "call_write"},
+            {"role": "assistant", "content": "Written."},
+            {"role": "user", "content": "recent"},
+            {"role": "assistant", "content": "reply"},
+        ]
+        result, pruned = self._prune_with_mocks(c, messages, protect_tail_count=2)
+        # 150 < 200 → should NOT be pruned
+        assert pruned == 0
+
+    def test_unknown_tool_defaults_to_write_threshold(self):
+        """Tools without a match in the registry default to write (200 chars)."""
+        c = self._make_compressor()
+        messages = [
+            {"role": "system", "content": "You are helpful."},
+            {"role": "user", "content": "Do something"},
+            {"role": "assistant", "content": None,
+             "tool_calls": [{"id": "call_mystery", "type": "function",
+                              "function": {"name": "nonexistent_tool", "arguments": '{}'}}]},
+            # 150 chars — below 200 default → not pruned
+            {"role": "tool", "content": "x" * 150, "tool_call_id": "call_mystery"},
+            {"role": "assistant", "content": "Done."},
+            {"role": "user", "content": "recent"},
+            {"role": "assistant", "content": "reply"},
+        ]
+        result, pruned = self._prune_with_mocks(c, messages, protect_tail_count=2)
+        assert pruned == 0
+
+    def test_mixed_permissions_prune_differently(self):
+        """Read and dangerous tools in the same conversation are pruned at different thresholds."""
+        c = self._make_compressor()
+        messages = [
+            {"role": "system", "content": "System"},
+            {"role": "user", "content": "Read and run"},
+            # read_file result: 150 chars → pruned (150 > 100)
+            {"role": "assistant", "content": None,
+             "tool_calls": [{"id": "c_read", "type": "function",
+                              "function": {"name": "read_file", "arguments": '{"path": "a.txt"}'}}]},
+            {"role": "tool", "content": "x" * 150, "tool_call_id": "c_read"},
+            # terminal result: 300 chars → NOT pruned (300 < 500)
+            {"role": "assistant", "content": None,
+             "tool_calls": [{"id": "c_term", "type": "function",
+                              "function": {"name": "terminal", "arguments": '{"command": "ls"}'}}]},
+            {"role": "tool", "content": "x" * 300, "tool_call_id": "c_term"},
+            {"role": "user", "content": "recent"},
+            {"role": "assistant", "content": "reply"},
+        ]
+        result, pruned = self._prune_with_mocks(c, messages, protect_tail_count=2)
+        # Only the read_file result should be pruned (150 > 100 but 300 < 500)
+        assert pruned == 1
+        # Verify: read result pruned, terminal result preserved
+        tool_results = [m for m in result if m.get("role") == "tool"]
+        pruned_results = [m for m in tool_results if m.get("content") == "[Old tool output cleared to save context space]"]
+        preserved_results = [m for m in tool_results if len(m.get("content", "")) == 300]
+        assert len(pruned_results) == 1
+        assert len(preserved_results) == 1
