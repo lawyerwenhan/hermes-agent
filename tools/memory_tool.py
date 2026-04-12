@@ -553,6 +553,7 @@ registry.register(
         store=kw.get("store")),
     check_fn=check_memory_requirements,
     emoji="🧠",
+    permission_level="write",
 )
 
 

@@ -274,4 +274,5 @@ registry.register(
         todos=args.get("todos"), merge=args.get("merge", False), store=kw.get("store")),
     check_fn=check_todo_requirements,
     emoji="📋",
+    permission_level="write",
 )

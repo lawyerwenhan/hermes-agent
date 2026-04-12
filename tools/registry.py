@@ -27,12 +27,18 @@ class ToolEntry:
     __slots__ = (
         "name", "toolset", "schema", "handler", "check_fn",
         "requires_env", "is_async", "description", "emoji",
-        "max_result_size_chars",
+        "max_result_size_chars", "permission_level",
     )
+
+    # Permission levels borrowed from Claude Code's design:
+    #   "read"      — read-only, no side effects (search, read files)
+    #   "write"     — may modify files/state (write, patch, terminal safe cmds)
+    #   "dangerous" — high risk, needs user confirmation (rm, format, destructive)
+    DEFAULT_PERMISSION = "write"
 
     def __init__(self, name, toolset, schema, handler, check_fn,
                  requires_env, is_async, description, emoji,
-                 max_result_size_chars=None):
+                 max_result_size_chars=None, permission_level=None):
         self.name = name
         self.toolset = toolset
         self.schema = schema
@@ -43,6 +49,7 @@ class ToolEntry:
         self.description = description
         self.emoji = emoji
         self.max_result_size_chars = max_result_size_chars
+        self.permission_level = permission_level or self.DEFAULT_PERMISSION
 
 
 class ToolRegistry:
@@ -68,8 +75,15 @@ class ToolRegistry:
         description: str = "",
         emoji: str = "",
         max_result_size_chars: int | float | None = None,
+        permission_level: str = None,
     ):
-        """Register a tool.  Called at module-import time by each tool file."""
+        """Register a tool.  Called at module-import time by each tool file.
+
+        *permission_level* classifies the tool's risk:
+            "read"      — read-only, no side effects  (auto-approved)
+            "write"     — may modify files/state        (ask once per session)
+            "dangerous" — high risk, always confirm     (terminal rm, etc.)
+        """
         existing = self._tools.get(name)
         if existing and existing.toolset != toolset:
             logger.warning(
@@ -88,6 +102,7 @@ class ToolRegistry:
             description=description or schema.get("description", ""),
             emoji=emoji,
             max_result_size_chars=max_result_size_chars,
+            permission_level=permission_level or ToolEntry.DEFAULT_PERMISSION,
         )
         if check_fn and toolset not in self._toolset_checks:
             self._toolset_checks[toolset] = check_fn
@@ -205,6 +220,16 @@ class ToolRegistry:
     def get_tool_to_toolset_map(self) -> Dict[str, str]:
         """Return ``{tool_name: toolset_name}`` for every registered tool."""
         return {name: e.toolset for name, e in self._tools.items()}
+
+    def get_permission_level(self, name: str) -> str:
+        """Return the permission level of a tool, or 'write' if unknown."""
+        entry = self._tools.get(name)
+        return entry.permission_level if entry else self.DEFAULT_PERMISSION if hasattr(self, 'DEFAULT_PERMISSION') else "write"
+
+    def get_tools_by_permission(self, level: str) -> List[str]:
+        """Return tool names that have the given permission level."""
+        return sorted(name for name, e in self._tools.items()
+                      if e.permission_level == level)
 
     def is_toolset_available(self, toolset: str) -> bool:
         """Check if a toolset's requirements are met.

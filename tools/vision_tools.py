@@ -795,4 +795,5 @@ registry.register(
     check_fn=check_vision_requirements,
     is_async=True,
     emoji="👁️",
+    permission_level="read",
 )

@@ -216,7 +216,8 @@ class IterationBudget:
 _NEVER_PARALLEL_TOOLS = frozenset({"clarify"})
 
 # Read-only tools with no shared mutable session state.
-_PARALLEL_SAFE_TOOLS = frozenset({
+# Static fallback — used at module import before registry is populated.
+_STATIC_PARALLEL_SAFE_TOOLS = frozenset({
     "ha_get_state",
     "ha_list_entities",
     "ha_list_services",
@@ -229,6 +230,23 @@ _PARALLEL_SAFE_TOOLS = frozenset({
     "web_extract",
     "web_search",
 })
+
+
+def _get_parallel_safe_tools() -> frozenset:
+    """Return read-only tool names for parallelization.
+
+    At runtime, prefer the registry's ``permission_level`` metadata so that
+    new tools are automatically classified.  Falls back to the static set
+    if the registry is unavailable or empty (e.g. during early import).
+    """
+    try:
+        from tools.registry import registry as _reg
+        read_tools = _reg.get_tools_by_permission("read")
+        if read_tools:
+            return frozenset(read_tools)
+    except Exception:
+        pass
+    return _STATIC_PARALLEL_SAFE_TOOLS
 
 # File tools can run concurrently when they target independent paths.
 _PATH_SCOPED_TOOLS = frozenset({"read_file", "write_file", "patch"})
@@ -302,7 +320,7 @@ def _should_parallelize_tool_batch(tool_calls) -> bool:
             reserved_paths.append(scoped_path)
             continue
 
-        if tool_name not in _PARALLEL_SAFE_TOOLS:
+        if tool_name not in _get_parallel_safe_tools():
             return False
 
     return True
