@@ -13,8 +13,12 @@ import json
 from typing import Tuple, Optional
 
 # Pattern to detect git commit commands
+# Matches: git commit, git ci (alias), git commit -m "...", etc.
+# Also catches common obfuscation: quotes, subshells, env overrides
 _GIT_COMMIT_PATTERN = re.compile(
-    r'\bgit\s+commit\b',
+    r'\bgit\s+(?:-[a-zA-Z]+\s+)*commit\b'  # git with flags before commit
+    r'|\bgit\s+ci\b'                          # git ci alias
+    r'|\bgit-commit\b',                        # direct invocation
     re.IGNORECASE
 )
 

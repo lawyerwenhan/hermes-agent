@@ -609,6 +609,12 @@ def write_file_tool(path: str, content: str, task_id: str = "default") -> str:
             log_file_write(path=path, exit_code=0, pattern=None, blocked=False)
         except Exception:
             pass  # Audit logging should never break the main flow
+        # Track file change for Layer F audit enforcement
+        try:
+            from tools.change_tracker import record_change
+            record_change(file_path=path, operation="write_file", diff_text=content)
+        except Exception:
+            pass  # Change tracking should never break the main flow
         if stale_warning:
             result_dict["_warning"] = stale_warning
         # Refresh the stored timestamp so consecutive writes by this

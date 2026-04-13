@@ -138,6 +138,9 @@ def record_change(
         content_hash: Optional hash of file content for verification
     """
     try:
+        # Normalize path to avoid duplicate entries
+        file_path = os.path.normpath(os.path.abspath(file_path))
+        
         change_type = classify_change(diff_text, file_path)
 
         # For write_file without diff, hash the content if provided

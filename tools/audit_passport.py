@@ -21,18 +21,19 @@ _write_lock = threading.Lock()
 
 
 def _get_hmac_key() -> bytes:
-    """Get daily-rotated HMAC key for passport signatures."""
-    tz_utc8 = timezone(timedelta(hours=8))
-    date_str = datetime.now(tz_utc8).strftime("%Y-%m-%d")
-    salt_path = os.path.expanduser("~/.hermes/.audit_salt")
-    if not os.path.exists(salt_path):
-        key = os.urandom(32)
-        with open(salt_path, "wb") as f:
-            f.write(key)
-    else:
-        with open(salt_path, "rb") as f:
-            key = f.read()
-    return key + date_str.encode("utf-8")
+    """Get HMAC key derived from machine identity. Stable across restarts."""
+    import hashlib
+    # Derive from username + hostname — stable, no file dependency
+    import getpass
+    try:
+        user = getpass.getuser()
+    except Exception:
+        user = "unknown"
+    import socket
+    hostname = socket.gethostname()
+    # Combine with a fixed salt for Hermes audit passports
+    identity = f"hermes-audit:{user}@{hostname}".encode("utf-8")
+    return hashlib.sha256(identity).digest()
 
 
 def _get_passports_path() -> Path:
