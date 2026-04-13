@@ -126,37 +126,48 @@ def _write_state(state: dict) -> None:
 def _update_state_entry(file_path: str, change_type: str, diff_hash: str,
                         operation: str, audited: bool = False,
                         passport_id: Optional[str] = None) -> None:
-    """Update a single file entry in the state file."""
+    """Update a single file entry in the state file with interprocess locking."""
     file_path = _normalize_file_path(file_path)
-    state = _read_state()
-    state["files"][file_path] = {
-        "change_type": change_type,
-        "diff_hash": diff_hash or "unknown",
-        "operation": operation,
-        "audited": audited,
-        "passport_id": passport_id,
-        "last_modified": _get_timestamp(),
-    }
-    _write_state(state)
+    state_lock = _get_audit_dir() / ".audit_state.lock"
+    with open(state_lock, "a+", encoding="utf-8") as lock_file:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        try:
+            state = _read_state()
+            state["files"][file_path] = {
+                "change_type": change_type,
+                "diff_hash": diff_hash or "unknown",
+                "operation": operation,
+                "audited": audited,
+                "passport_id": passport_id,
+                "last_modified": _get_timestamp(),
+            }
+            _write_state(state)
+        finally:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
 
 def _mark_state_audited(files_audited: list, diff_hashes: list,
                          passport_id: str) -> int:
-    """Mark files as audited in the state file. Returns number updated."""
+    """Mark files as audited in the state file with interprocess locking. AND logic."""
     normalized_files = {_normalize_file_path(p): h for p, h in
                         zip(files_audited, diff_hashes)}
-    state = _read_state()
+    state_lock = _get_audit_dir() / ".audit_state.lock"
     updated = 0
-    for file_path, diff_hash in normalized_files.items():
-        entry = state["files"].get(file_path)
-        if entry and not entry.get("audited", False):
-            # AND logic: both file AND hash must match
-            if entry.get("diff_hash") == diff_hash:
-                entry["audited"] = True
-                entry["passport_id"] = passport_id
-                updated += 1
-    if updated > 0:
-        _write_state(state)
+    with open(state_lock, "a+", encoding="utf-8") as lock_file:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        try:
+            state = _read_state()
+            for file_path, diff_hash in normalized_files.items():
+                entry = state["files"].get(file_path)
+                if entry and not entry.get("audited", False):
+                    if entry.get("diff_hash") == diff_hash:
+                        entry["audited"] = True
+                        entry["passport_id"] = passport_id
+                        updated += 1
+            if updated > 0:
+                _write_state(state)
+        finally:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
     return updated
 
 
@@ -266,16 +277,7 @@ def record_change(
 
         diff_hash = content_hash or "unknown"
 
-        # 1. Update state file (O(1) reads for future queries)
-        _update_state_entry(
-            file_path=file_path,
-            change_type=change_type,
-            diff_hash=diff_hash,
-            operation=operation,
-            audited=False,
-        )
-
-        # 2. Append to journal (audit history, tamper evidence)
+        # 1. Append to journal FIRST (append-only, can't roll back state without journal)
         changes_path = _get_changes_path()
         with _write_lock:
             lock_path = _get_changes_lock_path()
@@ -296,6 +298,16 @@ def record_change(
                     _append_change_entry(changes_path, entry)
                 finally:
                     fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+        # 2. Update state file AFTER journal write succeeds
+        # If state write fails, journal still has the record — rebuild can recover
+        _update_state_entry(
+            file_path=file_path,
+            change_type=change_type,
+            diff_hash=diff_hash,
+            operation=operation,
+            audited=False,
+        )
     except Exception:
         # Never let tracking break file operations
         pass
