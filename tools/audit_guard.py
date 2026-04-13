@@ -8,24 +8,117 @@ blocks the commit and provides instructions for running the audit.
 Trivial changes (docs, comments, whitespace) are auto-passed.
 """
 
-import re
 import json
-from typing import Tuple, Optional
+import shlex
+from typing import Optional, Tuple
 
-# Pattern to detect git commit commands
-# Matches: git commit, git ci (alias), git commit -m "...", etc.
-# Also catches common obfuscation: quotes, subshells, env overrides
-_GIT_COMMIT_PATTERN = re.compile(
-    r'\bgit\s+(?:-[a-zA-Z]+\s+)*commit\b'  # git with flags before commit
-    r'|\bgit\s+ci\b'                          # git ci alias
-    r'|\bgit-commit\b',                        # direct invocation
-    re.IGNORECASE
-)
+
+def _is_env_assignment(token: str) -> bool:
+    """Return True for shell-style VAR=value prefixes."""
+    if "=" not in token or token.startswith("="):
+        return False
+    name, _value = token.split("=", 1)
+    return bool(name) and name.replace("_", "a").isalnum() and not name[0].isdigit()
+
+
+def _consume_env_prefix(tokens: list[str], index: int) -> int:
+    """Skip leading env assignments and optional `env` wrapper."""
+    while index < len(tokens) and _is_env_assignment(tokens[index]):
+        index += 1
+
+    if index < len(tokens) and tokens[index] == "env":
+        index += 1
+        while index < len(tokens):
+            token = tokens[index]
+            if token == "--":
+                index += 1
+                break
+            if token.startswith("-"):
+                index += 1
+                continue
+            if _is_env_assignment(token):
+                index += 1
+                continue
+            break
+        while index < len(tokens) and _is_env_assignment(tokens[index]):
+            index += 1
+
+    return index
+
+
+def _is_git_commit_command(command: str) -> bool:
+    """Return True only when the parsed shell command is `git ... commit`."""
+    try:
+        tokens = shlex.split(command, posix=True)
+    except ValueError:
+        return False
+
+    if not tokens:
+        return False
+
+    index = _consume_env_prefix(tokens, 0)
+    if index >= len(tokens) or tokens[index] != "git":
+        return False
+
+    index += 1
+    while index < len(tokens):
+        token = tokens[index]
+        if token == "--":
+            return False
+        if token == "commit":
+            return True
+        if not token.startswith("-"):
+            return False
+
+        if token == "--no-pager":
+            index += 1
+            continue
+        if token == "-c":
+            index += 2
+            continue
+        if token == "-C":
+            index += 2
+            continue
+        if token.startswith("--git-dir="):
+            index += 1
+            continue
+        if token == "--git-dir":
+            index += 2
+            continue
+        if token.startswith("--work-tree="):
+            index += 1
+            continue
+        if token == "--work-tree":
+            index += 2
+            continue
+        return False
+
+    return False
 
 
 def is_git_commit(command: str) -> bool:
-    """Check if a command is a git commit."""
-    return bool(_GIT_COMMIT_PATTERN.search(command))
+    """Check if a command is an actual git commit invocation."""
+    return _is_git_commit_command(command)
+
+
+def _test_git_commit_detection() -> None:
+    """Sanity-check parser behavior for the supported git commit forms."""
+    cases = {
+        'git commit -m "message"': True,
+        "git -c core.editor=true commit": True,
+        "git --no-pager commit -m x": True,
+        "git --git-dir=/foo commit": True,
+        "echo git commit": False,
+        'python -c "print(\\"git commit\\")"': False,
+        "git log --oneline": False,
+        "git status": False,
+        "git show HEAD": False,
+        "env VAR=1 git --no-pager commit -m x": True,
+    }
+
+    for command, expected in cases.items():
+        actual = _is_git_commit_command(command)
+        assert actual is expected, f"{command!r}: expected {expected}, got {actual}"
 
 
 def check_audit_requirement(command: str) -> Tuple[bool, Optional[str]]:
