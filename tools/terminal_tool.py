@@ -181,6 +181,132 @@ def _validate_workdir(workdir: str) -> str | None:
     return None
 
 
+_TRACKED_CHANGE_EXTENSIONS = {
+    ".py",
+    ".js",
+    ".ts",
+    ".yaml",
+    ".yml",
+    ".json",
+    ".toml",
+    ".cfg",
+}
+
+_IGNORED_CHANGE_EXTENSIONS = {
+    ".log",
+    ".tmp",
+    ".pyc",
+}
+
+
+def _terminal_tracking_repo_root(cwd: str | None) -> Path | None:
+    """Return the git repo root for the execution cwd, or None outside a repo."""
+    try:
+        probe = subprocess.run(
+            ["git", "rev-parse", "--is-inside-work-tree"],
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if probe.returncode != 0 or probe.stdout.strip() != "true":
+            return None
+
+        repo_root = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if repo_root.returncode != 0:
+            return None
+        return Path(repo_root.stdout.strip())
+    except Exception:
+        return None
+
+
+def _capture_git_porcelain(cwd: str | None) -> str:
+    """Capture git porcelain state for opportunistic change tracking."""
+    result = subprocess.run(
+        ["git", "status", "--porcelain"],
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return result.stdout or ""
+
+
+def _parse_git_porcelain_map(porcelain: str) -> dict[str, str]:
+    """Map repo-relative paths to their porcelain status lines."""
+    entries: dict[str, str] = {}
+    for line in porcelain.splitlines():
+        if len(line) < 4:
+            continue
+        path_part = line[3:]
+        if " -> " in path_part:
+            path_part = path_part.split(" -> ", 1)[1]
+        if path_part:
+            entries[path_part] = line
+    return entries
+
+
+def _should_track_terminal_change(file_path: str) -> bool:
+    """Track only logic/code/config files, skipping transient artifacts."""
+    suffix = Path(file_path).suffix.lower()
+    if suffix in _IGNORED_CHANGE_EXTENSIONS:
+        return False
+    return suffix in _TRACKED_CHANGE_EXTENSIONS
+
+
+def _track_terminal_side_file_changes(
+    command: str,
+    cwd: str | None,
+    git_state_before: str,
+) -> None:
+    """Record newly dirty git-tracked files after a successful terminal command."""
+    try:
+        repo_root = _terminal_tracking_repo_root(cwd)
+        if repo_root is None:
+            return
+
+        git_state_after = _capture_git_porcelain(str(repo_root))
+        before_map = _parse_git_porcelain_map(git_state_before)
+        after_map = _parse_git_porcelain_map(git_state_after)
+
+        changed_paths = [
+            path for path in after_map
+            if path not in before_map and _should_track_terminal_change(path)
+        ]
+        if not changed_paths:
+            return
+
+        from tools.audit_logger import log_terminal_command
+        from tools.change_tracker import record_change
+
+        for rel_path in changed_paths:
+            abs_path = str((repo_root / rel_path).resolve())
+            diff_result = subprocess.run(
+                ["git", "diff", "--", rel_path],
+                cwd=str(repo_root),
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            diff_text = diff_result.stdout if diff_result.returncode in (0, 1) else ""
+            record_change(abs_path, "terminal_command", diff_text or "", None)
+
+        log_terminal_command(
+            cmd=str(command)[:500],
+            exit_code=0,
+            pattern="terminal-file-modification",
+            blocked=False,
+        )
+    except Exception as e:
+        logger.warning("Terminal-side change tracking failed: %s", e)
+
+
 def _handle_sudo_failure(output: str, env_type: str) -> str:
     """
     Check for sudo failure and add helpful message for messaging contexts.
@@ -1508,6 +1634,16 @@ def terminal_tool(
                     "error": f"Failed to start background process: {str(e)}"
                 }, ensure_ascii=False)
         else:
+            tracking_cwd = workdir or cwd
+            tracking_enabled = False
+            git_state_before = ""
+            try:
+                if _terminal_tracking_repo_root(tracking_cwd) is not None:
+                    tracking_enabled = True
+                    git_state_before = _capture_git_porcelain(tracking_cwd)
+            except Exception as e:
+                logger.warning("Pre-exec terminal change snapshot failed: %s", e)
+
             # Run foreground command with retry logic
             max_retries = 3
             retry_count = 0
@@ -1596,6 +1732,13 @@ def terminal_tool(
                 log_terminal_command(cmd=str(command)[:500], exit_code=returncode, pattern=None, blocked=False)
             except Exception:
                 pass  # Audit logging should never break the main flow
+
+            if returncode == 0 and tracking_enabled:
+                _track_terminal_side_file_changes(
+                    command=command,
+                    cwd=tracking_cwd,
+                    git_state_before=git_state_before,
+                )
 
             return json.dumps(result_dict, ensure_ascii=False)
 

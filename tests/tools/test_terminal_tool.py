@@ -1,5 +1,8 @@
 """Regression tests for sudo detection and sudo password handling."""
 
+import json
+from types import SimpleNamespace
+
 import tools.terminal_tool as terminal_tool
 
 
@@ -88,3 +91,77 @@ def test_cached_sudo_password_is_used_when_env_is_unset(monkeypatch):
 
     assert transformed == "echo ok && sudo -S -p '' whoami"
     assert sudo_stdin == "cached-pass\n"
+
+
+def test_terminal_tool_tracks_git_detected_file_changes_on_success(monkeypatch, tmp_path):
+    config = {
+        "env_type": "local",
+        "docker_image": "",
+        "singularity_image": "",
+        "modal_image": "",
+        "daytona_image": "",
+        "cwd": str(tmp_path),
+        "timeout": 30,
+    }
+    dummy_env = SimpleNamespace(env={}, execute=lambda *_args, **_kwargs: {"output": "ok", "returncode": 0})
+    tracker_calls = []
+
+    monkeypatch.setattr(terminal_tool, "_get_env_config", lambda: config)
+    monkeypatch.setattr(terminal_tool, "_start_cleanup_thread", lambda: None)
+    monkeypatch.setattr(terminal_tool, "_check_all_guards", lambda *_args, **_kwargs: {"approved": True})
+    monkeypatch.setattr(terminal_tool, "_terminal_tracking_repo_root", lambda _cwd: tmp_path)
+    monkeypatch.setattr(terminal_tool, "_capture_git_porcelain", lambda _cwd: "")
+    monkeypatch.setattr(
+        terminal_tool,
+        "_track_terminal_side_file_changes",
+        lambda **kwargs: tracker_calls.append(kwargs),
+    )
+    monkeypatch.setitem(terminal_tool._active_environments, "default", dummy_env)
+    monkeypatch.setitem(terminal_tool._last_activity, "default", 0.0)
+
+    try:
+        result = json.loads(terminal_tool.terminal_tool(command="python -c 'print(1)'"))
+    finally:
+        terminal_tool._active_environments.pop("default", None)
+        terminal_tool._last_activity.pop("default", None)
+
+    assert result["exit_code"] == 0
+    assert tracker_calls == [{
+        "command": "python -c 'print(1)'",
+        "cwd": str(tmp_path),
+        "git_state_before": "",
+    }]
+
+
+def test_terminal_tool_skips_git_tracking_on_failed_command(monkeypatch, tmp_path):
+    config = {
+        "env_type": "local",
+        "docker_image": "",
+        "singularity_image": "",
+        "modal_image": "",
+        "daytona_image": "",
+        "cwd": str(tmp_path),
+        "timeout": 30,
+    }
+    dummy_env = SimpleNamespace(env={}, execute=lambda *_args, **_kwargs: {"output": "nope", "returncode": 2})
+
+    monkeypatch.setattr(terminal_tool, "_get_env_config", lambda: config)
+    monkeypatch.setattr(terminal_tool, "_start_cleanup_thread", lambda: None)
+    monkeypatch.setattr(terminal_tool, "_check_all_guards", lambda *_args, **_kwargs: {"approved": True})
+    monkeypatch.setattr(terminal_tool, "_terminal_tracking_repo_root", lambda _cwd: tmp_path)
+    monkeypatch.setattr(terminal_tool, "_capture_git_porcelain", lambda _cwd: "")
+
+    def _fail_if_called(**_kwargs):
+        raise AssertionError("tracking should not run for non-zero exits")
+
+    monkeypatch.setattr(terminal_tool, "_track_terminal_side_file_changes", _fail_if_called)
+    monkeypatch.setitem(terminal_tool._active_environments, "default", dummy_env)
+    monkeypatch.setitem(terminal_tool._last_activity, "default", 0.0)
+
+    try:
+        result = json.loads(terminal_tool.terminal_tool(command="python -c 'raise SystemExit(2)'"))
+    finally:
+        terminal_tool._active_environments.pop("default", None)
+        terminal_tool._last_activity.pop("default", None)
+
+    assert result["exit_code"] == 2
