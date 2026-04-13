@@ -350,48 +350,17 @@ def mark_changes_audited(passport_id: str, files_audited: list, diff_hashes: lis
         Number of entries updated
     """
     try:
-        # 1. Update state file (O(1) operation)
+        # 1. Update state file (O(1) operation, with interprocess lock)
         state_updated = _mark_state_audited(files_audited, diff_hashes, passport_id)
 
-        # 2. Update journal entries (for audit trail)
-        changes_path = _get_changes_path()
-        if not changes_path.exists():
-            return state_updated
+        # 2. Journal is APPEND-ONLY — do NOT rewrite it.
+        # Audited status is maintained in the state file only.
+        # Previous versions rewrote the journal to set audited=True, which
+        # broke the prev_hash chain (changing line content invalidates downstream hashes).
+        # The state file is the authoritative source for audit status.
+        # The journal's audited field is set at creation time and never updated.
 
-        normalized_files = {_normalize_file_path(p): h for p, h in
-                           zip(files_audited, diff_hashes)}
-        journal_updated = 0
-        lines = []
-        with _write_lock:
-            lock_path = _get_changes_lock_path()
-            with open(lock_path, "a+", encoding="utf-8") as lock_file:
-                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
-                try:
-                    with open(changes_path, "r", encoding="utf-8") as f:
-                        for line in f:
-                            line_stripped = line.strip()
-                            if not line_stripped:
-                                continue
-                            try:
-                                entry = json.loads(line_stripped)
-                                # AND logic: both file AND hash must match
-                                entry_file = entry.get("file", "")
-                                entry_hash = entry.get("diff_hash", "")
-                                if (entry_file in normalized_files
-                                        and normalized_files[entry_file] == entry_hash
-                                        and not entry.get("audited", False)):
-                                    entry["audited"] = True
-                                    entry["passport_id"] = passport_id
-                                    journal_updated += 1
-                                lines.append(json.dumps(entry, ensure_ascii=False))
-                            except json.JSONDecodeError:
-                                lines.append(line_stripped)
-
-                    _rewrite_changes_file(changes_path, lines)
-                finally:
-                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
-
-        return max(state_updated, journal_updated)
+        return state_updated
     except Exception:
         return 0
 
