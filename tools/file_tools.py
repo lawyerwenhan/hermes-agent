@@ -580,16 +580,35 @@ def write_file_tool(path: str, content: str, task_id: str = "default") -> str:
     has_errors, errors = validate_file_write(path, content)
     if has_errors:
         error_msg = format_pre_flight_errors(errors)
+        # Log pre-flight blocked file writes (Layer C audit)
+        try:
+            from tools.audit_logger import log_file_write
+            pattern_id = errors[0].pattern_id if isinstance(errors, list) and errors else None
+            log_file_write(path=path, exit_code=-1, pattern=pattern_id, blocked=True)
+        except Exception:
+            pass  # Audit logging should never break the main flow
         return tool_error(error_msg)
-    
+
     sensitive_err = _check_sensitive_path(path)
     if sensitive_err:
+        # Log sensitive path blocked file writes (Layer C audit)
+        try:
+            from tools.audit_logger import log_file_write
+            log_file_write(path=path, exit_code=-1, pattern="sensitive_path", blocked=True)
+        except Exception:
+            pass  # Audit logging should never break the main flow
         return tool_error(sensitive_err)
     try:
         stale_warning = _check_file_staleness(path, task_id)
         file_ops = _get_file_ops(task_id)
         result = file_ops.write_file(path, content)
         result_dict = result.to_dict()
+        # Log successful file write (Layer C audit)
+        try:
+            from tools.audit_logger import log_file_write
+            log_file_write(path=path, exit_code=0, pattern=None, blocked=False)
+        except Exception:
+            pass  # Audit logging should never break the main flow
         if stale_warning:
             result_dict["_warning"] = stale_warning
         # Refresh the stored timestamp so consecutive writes by this
@@ -597,6 +616,15 @@ def write_file_tool(path: str, content: str, task_id: str = "default") -> str:
         _update_read_timestamp(path, task_id)
         return json.dumps(result_dict, ensure_ascii=False)
     except Exception as e:
+        # Log failed file writes (Layer C audit)
+        try:
+            from tools.audit_logger import log_file_write
+            exit_code = -1
+            if isinstance(e, PermissionError):
+                exit_code = -2
+            log_file_write(path=path, exit_code=exit_code, pattern=None, blocked=False)
+        except Exception:
+            pass  # Audit logging should never break the main flow
         if _is_expected_write_exception(e):
             logger.debug("write_file expected denial: %s: %s", type(e).__name__, e)
         else:

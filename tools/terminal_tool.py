@@ -1178,13 +1178,22 @@ def terminal_tool(
         has_errors, errors = validate_terminal_command(command)
         if has_errors:
             error_msg = format_pre_flight_errors(errors)
+            # Log pre-flight blocked commands before returning
+            try:
+                from tools.audit_logger import log_terminal_command
+                pattern_id = None
+                if errors:
+                    pattern_id = errors[0].pattern_id if errors else None
+                log_terminal_command(cmd=str(command)[:500], exit_code=-1, pattern=pattern_id, blocked=True)
+            except Exception:
+                pass  # Audit logging should never break the main flow
             return json.dumps({
                 "output": "",
                 "exit_code": -1,
                 "error": error_msg,
                 "status": "error",
             }, ensure_ascii=False)
-        
+
         if not isinstance(command, str):
             logger.warning(
                 "Rejected invalid terminal command value: %s",
@@ -1326,9 +1335,23 @@ def terminal_tool(
         # Pre-exec security checks (tirith + dangerous command detection)
         # Skip check if force=True (user has confirmed they want to run it)
         approval_note = None
+        if force:
+            try:
+                from tools.audit_logger import log_terminal_command
+                log_terminal_command(cmd=str(command)[:500], exit_code=0, pattern="force-bypass", blocked=False)
+            except Exception:
+                pass
         if not force:
             approval = _check_all_guards(command, env_type)
             if not approval["approved"]:
+                # Log approval system blocked commands (pre-exec guards)
+                try:
+                    from tools.audit_logger import log_terminal_command
+                    pattern_id = approval.get("pattern_key") or approval.get("pattern")
+                    log_terminal_command(cmd=str(command)[:500], exit_code=-1, pattern=pattern_id, blocked=True)
+                except Exception:
+                    pass  # Audit logging should never break the main flow
+
                 # Check if this is an approval_required (gateway ask mode)
                 if approval.get("status") == "approval_required":
                     return json.dumps({
@@ -1553,12 +1576,24 @@ def terminal_tool(
             if exit_note:
                 result_dict["exit_code_meaning"] = exit_note
 
+            # Log successful command execution (Layer C audit)
+            try:
+                from tools.audit_logger import log_terminal_command
+                log_terminal_command(cmd=str(command)[:500], exit_code=returncode, pattern=None, blocked=False)
+            except Exception:
+                pass  # Audit logging should never break the main flow
+
             return json.dumps(result_dict, ensure_ascii=False)
 
     except Exception as e:
         import traceback
         tb_str = traceback.format_exc()
         logger.error("terminal_tool exception:\n%s", tb_str)
+        try:
+            from tools.audit_logger import log_terminal_command
+            log_terminal_command(cmd=str(command)[:500], exit_code=-1, pattern="exception", blocked=False)
+        except Exception:
+            pass
         return json.dumps({
             "output": "",
             "exit_code": -1,
