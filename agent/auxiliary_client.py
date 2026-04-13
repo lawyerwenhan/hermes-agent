@@ -272,6 +272,11 @@ class _CodexCompletionsAdapter:
         instructions = "You are a helpful assistant."
         input_msgs: List[Dict[str, Any]] = []
         for msg in messages:
+            # Guard: skip non-dict message entries (e.g. stray strings
+            # introduced by a fallback swap) so we do not crash with
+            # "str object has no attribute get".
+            if not isinstance(msg, dict):
+                continue
             role = msg.get("role", "user")
             content = msg.get("content") or ""
             if role == "system":
@@ -2090,6 +2095,11 @@ def _convert_openai_images_to_anthropic(messages: list) -> list:
     """
     converted = []
     for msg in messages:
+        # Guard: msg may be a non-dict after a fallback/history mutation;
+        # skip conversion instead of crashing with AttributeError.
+        if not isinstance(msg, dict):
+            converted.append(msg)
+            continue
         content = msg.get("content")
         if not isinstance(content, list):
             converted.append(msg)
@@ -2097,6 +2107,12 @@ def _convert_openai_images_to_anthropic(messages: list) -> list:
         new_content = []
         changed = False
         for block in content:
+            # Guard: content list may contain plain strings from some
+            # providers/fallback paths. Pass them through unchanged instead
+            # of raising "str object has no attribute get".
+            if not isinstance(block, dict):
+                new_content.append(block)
+                continue
             if block.get("type") == "image_url":
                 image_url_val = (block.get("image_url") or {}).get("url", "")
                 if image_url_val.startswith("data:"):

@@ -62,3 +62,11 @@ mini-swe-agent/
 .direnv/
 result
 website/static/api/skills-index.json
+
+# Local backups from in-place edits
+*.bak-p*
+*.bak.[0-9]*
+*.bak.20[0-9]*
+
+# Runtime audit state (generated, not source)
+audit/

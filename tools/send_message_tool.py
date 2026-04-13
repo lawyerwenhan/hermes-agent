@@ -471,7 +471,12 @@ async def _send_telegram(token, chat_id, message, media_files=None, thread_id=No
             send_parse_mode = ParseMode.MARKDOWN_V2
 
         bot = Bot(token=token)
-        int_chat_id = int(chat_id)
+        # chat_id may be int, numeric string, or @username (Telegram supports all).
+        # Only coerce to int when it looks numeric; otherwise pass through.
+        try:
+            int_chat_id = int(chat_id)
+        except (TypeError, ValueError):
+            int_chat_id = chat_id
         media_files = media_files or []
         thread_kwargs = {}
         if thread_id is not None:

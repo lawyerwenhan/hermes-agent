@@ -261,10 +261,26 @@ class WebhookAdapter(BasePlatformAdapter):
             if not isinstance(data, dict):
                 return
             # Merge: static routes take precedence over dynamic ones
-            self._dynamic_routes = {
+            # SECURITY: enforce the same secret-required rule as startup
+            # validation in connect(). A dynamic route with no secret (and
+            # no global secret) would otherwise bypass HMAC checks entirely
+            # because _handle_webhook only validates when secret is truthy.
+            candidate_dynamic = {
                 k: v for k, v in data.items()
                 if k not in self._static_routes
             }
+            validated_dynamic = {}
+            for _name, _route in candidate_dynamic.items():
+                _sec = _route.get("secret", self._global_secret) if isinstance(_route, dict) else None
+                if not _sec:
+                    logger.error(
+                        "[webhook] Rejecting hot-reloaded route %r: no HMAC secret "
+                        "(set route.secret or a global secret; use %r for test-only mode)",
+                        _name, _INSECURE_NO_AUTH,
+                    )
+                    continue
+                validated_dynamic[_name] = _route
+            self._dynamic_routes = validated_dynamic
             self._routes = {**self._dynamic_routes, **self._static_routes}
             self._dynamic_routes_mtime = mtime
             logger.info(
@@ -289,9 +305,11 @@ class WebhookAdapter(BasePlatformAdapter):
             )
 
         # ── Auth-before-body ─────────────────────────────────────
-        # Check Content-Length before reading the full payload.
-        content_length = request.content_length or 0
-        if content_length > self._max_body_bytes:
+        # Fast reject on a declared Content-Length that exceeds the cap,
+        # but do NOT trust it — clients can lie. The real enforcement is
+        # the streaming accumulator below.
+        declared_length = request.content_length or 0
+        if declared_length > self._max_body_bytes:
             return web.json_response(
                 {"error": "Payload too large"}, status=413
             )
@@ -306,9 +324,19 @@ class WebhookAdapter(BasePlatformAdapter):
             )
         window.append(now)
 
-        # Read body
+        # Read body — stream chunks and count actual bytes received so a
+        # lying Content-Length header cannot trick us into buffering 100MB.
         try:
-            raw_body = await request.read()
+            chunks: List[bytes] = []
+            received = 0
+            async for chunk in request.content.iter_chunked(65536):
+                received += len(chunk)
+                if received > self._max_body_bytes:
+                    return web.json_response(
+                        {"error": "Payload too large"}, status=413
+                    )
+                chunks.append(chunk)
+            raw_body = b"".join(chunks)
         except Exception as e:
             logger.error("[webhook] Failed to read body: %s", e)
             return web.json_response({"error": "Bad request"}, status=400)
