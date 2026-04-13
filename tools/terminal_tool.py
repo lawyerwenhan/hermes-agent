@@ -145,10 +145,12 @@ from tools.approval import (
 )
 
 
-def _check_all_guards(command: str, env_type: str) -> dict:
+def _check_all_guards(command: str, env_type: str,
+                      execution_context: str | None = None) -> dict:
     """Delegate to consolidated guard (tirith + dangerous cmd) with CLI callback."""
     return _check_all_guards_impl(command, env_type,
-                                  approval_callback=_approval_callback)
+                                  approval_callback=_approval_callback,
+                                  execution_context=execution_context)
 
 
 # Allowlist: characters that can legitimately appear in directory paths.

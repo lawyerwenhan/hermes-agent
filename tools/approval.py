@@ -39,6 +39,25 @@ def reset_current_session_key(token: contextvars.Token[str]) -> None:
     _approval_session_key.reset(token)
 
 
+# Execution context: where a command originates from.
+# "interactive" (default) applies all patterns; "script" or "execute_code"
+# skips patterns that only make sense for interactive shell protection.
+_execution_context: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "execution_context",
+    default="interactive",
+)
+
+
+def set_execution_context(ctx: str) -> contextvars.Token[str]:
+    """Bind the execution context for the current task/thread."""
+    return _execution_context.set(ctx or "interactive")
+
+
+def reset_execution_context(token: contextvars.Token[str]) -> None:
+    """Restore the prior execution context."""
+    _execution_context.reset(token)
+
+
 def get_current_session_key(default: str = "default") -> str:
     """Return the active session key, preferring context-local state.
 
@@ -132,6 +151,14 @@ DANGEROUS_PATTERNS = [
     (r'\bchmod\s+\+x\b.*[;&|]+\s*\./', "chmod +x followed by immediate execution"),
 ]
 
+# Patterns that only apply in interactive shell context.  In script or
+# execute_code contexts these are false positives — the code is already
+# sandboxed or comes from a known script, not ad-hoc user input.
+_INTERACTIVE_ONLY_PATTERNS: frozenset[str] = frozenset({
+    "script execution via -e/-c flag",
+    "script execution via heredoc",
+})
+
 
 def _legacy_pattern_key(pattern: str) -> str:
     """Reproduce the old regex-derived approval key for backwards compatibility."""
@@ -178,14 +205,27 @@ def _normalize_command_for_detection(command: str) -> str:
     return command
 
 
-def detect_dangerous_command(command: str) -> tuple:
+def detect_dangerous_command(command: str,
+                            execution_context: Optional[str] = None) -> tuple:
     """Check if a command matches any dangerous patterns.
+
+    Args:
+        command: The shell command to check.
+        execution_context: Where the command originates — "interactive"
+            (default), "script", or "execute_code".  Non-interactive contexts
+            skip patterns that only protect against ad-hoc shell input.
+            Falls back to the contextvar if not provided.
 
     Returns:
         (is_dangerous, pattern_key, description) or (False, None, None)
     """
+    ctx = execution_context or _execution_context.get()
+    skip_interactive = ctx != "interactive"
+
     command_lower = _normalize_command_for_detection(command).lower()
     for pattern, description in DANGEROUS_PATTERNS:
+        if skip_interactive and description in _INTERACTIVE_ONLY_PATTERNS:
+            continue
         if re.search(pattern, command_lower, re.IGNORECASE | re.DOTALL):
             pattern_key = description
             return (True, pattern_key, description)
@@ -581,7 +621,8 @@ Respond with exactly one word: APPROVE, DENY, or ESCALATE"""
 
 
 def check_dangerous_command(command: str, env_type: str,
-                            approval_callback=None) -> dict:
+                            approval_callback=None,
+                            execution_context: Optional[str] = None) -> dict:
     """Check if a command is dangerous and handle approval.
 
     This is the main entry point called by terminal_tool before executing
@@ -591,6 +632,9 @@ def check_dangerous_command(command: str, env_type: str,
         command: The shell command to check.
         env_type: Terminal backend type ('local', 'ssh', 'docker', etc.).
         approval_callback: Optional CLI callback for interactive prompts.
+        execution_context: "interactive" (default), "script", or
+            "execute_code". Non-interactive contexts skip interpreter
+            -c/-e and heredoc patterns.
 
     Returns:
         {"approved": True/False, "message": str or None, ...}
@@ -603,7 +647,8 @@ def check_dangerous_command(command: str, env_type: str,
     if os.getenv("HERMES_YOLO_MODE") or is_current_session_yolo_enabled():
         return {"approved": True, "message": None}
 
-    is_dangerous, pattern_key, description = detect_dangerous_command(command)
+    is_dangerous, pattern_key, description = detect_dangerous_command(
+        command, execution_context=execution_context)
     if not is_dangerous:
         return {"approved": True, "message": None}
 
@@ -688,7 +733,8 @@ def _format_tirith_description(tirith_result: dict) -> str:
 
 
 def check_all_command_guards(command: str, env_type: str,
-                             approval_callback=None) -> dict:
+                             approval_callback=None,
+                             execution_context: Optional[str] = None) -> dict:
     """Run all pre-exec security checks and return a single approval decision.
 
     Gathers findings from tirith and dangerous-command detection, then
@@ -727,7 +773,8 @@ def check_all_command_guards(command: str, env_type: str,
         pass  # tirith module not installed — allow
 
     # Dangerous command check (detection only, no approval)
-    is_dangerous, pattern_key, description = detect_dangerous_command(command)
+    is_dangerous, pattern_key, description = detect_dangerous_command(
+        command, execution_context=execution_context)
 
     # --- Phase 2: Decide ---
 

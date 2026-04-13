@@ -383,6 +383,10 @@ def _rpc_server_loop(
                 # Dispatch through the standard tool handler.
                 # Suppress stdout/stderr from internal tool handlers so
                 # their status prints don't leak into the CLI spinner.
+                # Set execution context so approval patterns designed for
+                # interactive shells (interpreter -c/-e, heredoc) are skipped.
+                from tools.approval import set_execution_context, reset_execution_context
+                ctx_token = set_execution_context("execute_code")
                 try:
                     _real_stdout, _real_stderr = sys.stdout, sys.stderr
                     devnull = open(os.devnull, "w")
@@ -398,6 +402,8 @@ def _rpc_server_loop(
                 except Exception as exc:
                     logger.error("Tool call failed in sandbox: %s", exc, exc_info=True)
                     result = tool_error(str(exc))
+                finally:
+                    reset_execution_context(ctx_token)
 
                 tool_call_counter[0] += 1
                 call_duration = time.monotonic() - call_start
