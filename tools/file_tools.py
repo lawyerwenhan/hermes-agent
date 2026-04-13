@@ -2,7 +2,6 @@
 """File Tools Module - LLM agent file manipulation tools."""
 
 import errno
-import hashlib
 import json
 import logging
 import os
@@ -13,11 +12,6 @@ from tools.file_operations import ShellFileOperations
 from agent.redact import redact_sensitive_text
 
 logger = logging.getLogger(__name__)
-
-
-def tool_error(message: str) -> str:
-    """Format error message as JSON."""
-    return json.dumps({"error": message, "success": False}, ensure_ascii=False)
 
 
 _EXPECTED_WRITE_ERRNOS = {errno.EACCES, errno.EPERM, errno.EROFS}
@@ -129,99 +123,6 @@ def _is_expected_write_exception(exc: Exception) -> bool:
     if isinstance(exc, OSError) and exc.errno in _EXPECTED_WRITE_ERRNOS:
         return True
     return False
-
-
-def _hash_diff_text(diff_text: str) -> str | None:
-    """Return a stable short hash for diff text."""
-    if not diff_text:
-        return None
-    return hashlib.sha256(diff_text.encode("utf-8")).hexdigest()[:16]
-
-
-def _strip_diff_path_prefix(path_text: str) -> str:
-    """Normalize unified-diff path headers to a repository-relative path."""
-    path_text = path_text.strip()
-    if not path_text:
-        return path_text
-    path_text = path_text.split("\t", 1)[0].split(" ", 1)[0]
-    if path_text.startswith(("a/", "b/")):
-        return path_text[2:]
-    return path_text
-
-
-def _expand_patch_result_paths(result) -> list[str]:
-    """Return all concrete paths touched by a patch result."""
-    paths: list[str] = []
-    for entry in getattr(result, "files_modified", []) or []:
-        if " -> " in entry:
-            src, dst = entry.split(" -> ", 1)
-            for candidate in (src.strip(), dst.strip()):
-                if candidate:
-                    paths.append(candidate)
-        elif entry:
-            paths.append(entry)
-    for attr in ("files_created", "files_deleted"):
-        for entry in getattr(result, attr, []) or []:
-            if entry:
-                paths.append(entry)
-    return list(dict.fromkeys(paths))
-
-
-def _extract_patch_diffs(result) -> dict[str, str]:
-    """Map each touched path in a PatchResult to its diff text."""
-    combined_diff = getattr(result, "diff", "") or ""
-    touched_paths = _expand_patch_result_paths(result)
-    if not combined_diff.strip():
-        return {path: "" for path in touched_paths}
-
-    path_diffs: dict[str, str] = {}
-    current_lines: list[str] = []
-    current_path: str | None = None
-    from_path: str | None = None
-
-    def _flush_current() -> None:
-        nonlocal current_lines, current_path
-        if current_path and current_lines:
-            path_diffs[current_path] = "".join(current_lines)
-        current_lines = []
-        current_path = None
-
-    for line in combined_diff.splitlines(keepends=True):
-        if line.startswith("# Moved: "):
-            _flush_current()
-            move_text = line[len("# Moved: "):].strip()
-            if " -> " in move_text:
-                src, dst = move_text.split(" -> ", 1)
-                move_diff = line.rstrip("\n")
-                if src.strip():
-                    path_diffs[src.strip()] = move_diff
-                if dst.strip():
-                    path_diffs[dst.strip()] = move_diff
-            continue
-        if line.startswith("--- "):
-            _flush_current()
-            from_path = _strip_diff_path_prefix(line[4:])
-            current_lines = [line]
-            continue
-        if line.startswith("+++ ") and current_lines:
-            to_path = _strip_diff_path_prefix(line[4:])
-            if to_path == "/dev/null":
-                current_path = from_path
-            else:
-                current_path = to_path
-            current_lines.append(line)
-            continue
-        if current_lines:
-            current_lines.append(line)
-
-    _flush_current()
-
-    if len(touched_paths) == 1 and not path_diffs:
-        return {touched_paths[0]: combined_diff}
-
-    for path in touched_paths:
-        path_diffs.setdefault(path, combined_diff)
-    return path_diffs
 
 
 _file_ops_lock = threading.Lock()
@@ -669,50 +570,14 @@ def _check_file_staleness(filepath: str, task_id: str) -> str | None:
 
 def write_file_tool(path: str, content: str, task_id: str = "default") -> str:
     """Write content to a file."""
-    # Pre-flight validation (Layer D+E)
-    from tools.pre_flight import validate_file_write, format_pre_flight_errors
-    has_errors, errors = validate_file_write(path, content)
-    if has_errors:
-        error_msg = format_pre_flight_errors(errors)
-        # Log pre-flight blocked file writes (Layer C audit)
-        try:
-            from tools.audit_logger import log_file_write
-            pattern_id = errors[0].pattern_id if isinstance(errors, list) and errors else None
-            log_file_write(path=path, exit_code=-1, pattern=pattern_id, blocked=True)
-        except Exception:
-            pass  # Audit logging should never break the main flow
-        return tool_error(error_msg)
-
     sensitive_err = _check_sensitive_path(path)
     if sensitive_err:
-        # Log sensitive path blocked file writes (Layer C audit)
-        try:
-            from tools.audit_logger import log_file_write
-            log_file_write(path=path, exit_code=-1, pattern="sensitive_path", blocked=True)
-        except Exception:
-            pass  # Audit logging should never break the main flow
         return tool_error(sensitive_err)
     try:
         stale_warning = _check_file_staleness(path, task_id)
         file_ops = _get_file_ops(task_id)
         result = file_ops.write_file(path, content)
         result_dict = result.to_dict()
-        # Log file write result (Layer C audit) — check for errors first
-        try:
-            from tools.audit_logger import log_file_write
-            if result_dict.get("error"):
-                log_file_write(path=path, exit_code=-1, pattern="write_failed", blocked=False)
-            else:
-                log_file_write(path=path, exit_code=0, pattern=None, blocked=False)
-        except Exception:
-            pass  # Audit logging should never break the main flow
-        # Track file change for Layer F audit enforcement — only on success
-        if not result_dict.get("error"):
-            try:
-                from tools.change_tracker import record_change
-                record_change(file_path=path, operation="write_file", diff_text=content)
-            except Exception:
-                pass  # Change tracking should never break the main flow
         if stale_warning:
             result_dict["_warning"] = stale_warning
         # Refresh the stored timestamp so consecutive writes by this
@@ -720,15 +585,6 @@ def write_file_tool(path: str, content: str, task_id: str = "default") -> str:
         _update_read_timestamp(path, task_id)
         return json.dumps(result_dict, ensure_ascii=False)
     except Exception as e:
-        # Log failed file writes (Layer C audit)
-        try:
-            from tools.audit_logger import log_file_write
-            exit_code = -1
-            if isinstance(e, PermissionError):
-                exit_code = -2
-            log_file_write(path=path, exit_code=exit_code, pattern=None, blocked=False)
-        except Exception:
-            pass  # Audit logging should never break the main flow
         if _is_expected_write_exception(e):
             logger.debug("write_file expected denial: %s: %s", type(e).__name__, e)
         else:
@@ -751,11 +607,6 @@ def patch_tool(mode: str = "replace", path: str = None, old_string: str = None,
     for _p in _paths_to_check:
         sensitive_err = _check_sensitive_path(_p)
         if sensitive_err:
-            try:
-                from tools.audit_logger import log_file_write
-                log_file_write(path=_p, exit_code=-1, pattern="sensitive_path", blocked=True)
-            except Exception:
-                pass
             return tool_error(sensitive_err)
     try:
         # Check staleness for all files this patch will touch.
@@ -781,33 +632,6 @@ def patch_tool(mode: str = "replace", path: str = None, old_string: str = None,
             return tool_error(f"Unknown mode: {mode}")
         
         result_dict = result.to_dict()
-        touched_paths = _expand_patch_result_paths(result)
-        if result_dict.get("error"):
-            try:
-                from tools.audit_logger import log_file_write
-                blocked_paths = touched_paths or _paths_to_check or ([path] if path else [])
-                for _p in blocked_paths:
-                    log_file_write(path=_p, exit_code=-1, pattern="patch_failed", blocked=True)
-            except Exception:
-                pass
-        else:
-            try:
-                from tools.audit_logger import log_file_write
-                from tools.change_tracker import record_change
-
-                diff_by_path = _extract_patch_diffs(result)
-                success_paths = touched_paths or _paths_to_check or ([path] if path else [])
-                for _p in success_paths:
-                    log_file_write(path=_p, exit_code=0, pattern=None, blocked=False)
-                    diff_text = diff_by_path.get(_p, result_dict.get("diff", ""))
-                    record_change(
-                        file_path=_p,
-                        operation="patch",
-                        diff_text=diff_text,
-                        content_hash=_hash_diff_text(diff_text),
-                    )
-            except Exception:
-                pass
         if stale_warnings:
             result_dict["_warning"] = stale_warnings[0] if len(stale_warnings) == 1 else " | ".join(stale_warnings)
         # Refresh stored timestamps for all successfully-patched paths so
@@ -1005,7 +829,7 @@ def _handle_search_files(args, **kw):
         output_mode=args.get("output_mode", "content"), context=args.get("context", 0), task_id=tid)
 
 
-registry.register(name="read_file", toolset="file", schema=READ_FILE_SCHEMA, handler=_handle_read_file, check_fn=_check_file_reqs, emoji="📖", max_result_size_chars=float('inf'), permission_level="read")
-registry.register(name="write_file", toolset="file", schema=WRITE_FILE_SCHEMA, handler=_handle_write_file, check_fn=_check_file_reqs, emoji="✍️", max_result_size_chars=100_000, permission_level="write")
-registry.register(name="patch", toolset="file", schema=PATCH_SCHEMA, handler=_handle_patch, check_fn=_check_file_reqs, emoji="🔧", max_result_size_chars=100_000, permission_level="write")
-registry.register(name="search_files", toolset="file", schema=SEARCH_FILES_SCHEMA, handler=_handle_search_files, check_fn=_check_file_reqs, emoji="🔎", max_result_size_chars=100_000, permission_level="read")
+registry.register(name="read_file", toolset="file", schema=READ_FILE_SCHEMA, handler=_handle_read_file, check_fn=_check_file_reqs, emoji="📖", max_result_size_chars=float('inf'))
+registry.register(name="write_file", toolset="file", schema=WRITE_FILE_SCHEMA, handler=_handle_write_file, check_fn=_check_file_reqs, emoji="✍️", max_result_size_chars=100_000)
+registry.register(name="patch", toolset="file", schema=PATCH_SCHEMA, handler=_handle_patch, check_fn=_check_file_reqs, emoji="🔧", max_result_size_chars=100_000)
+registry.register(name="search_files", toolset="file", schema=SEARCH_FILES_SCHEMA, handler=_handle_search_files, check_fn=_check_file_reqs, emoji="🔎", max_result_size_chars=100_000)

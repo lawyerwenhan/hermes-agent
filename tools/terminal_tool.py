@@ -145,12 +145,10 @@ from tools.approval import (
 )
 
 
-def _check_all_guards(command: str, env_type: str,
-                      execution_context: str | None = None) -> dict:
+def _check_all_guards(command: str, env_type: str) -> dict:
     """Delegate to consolidated guard (tirith + dangerous cmd) with CLI callback."""
     return _check_all_guards_impl(command, env_type,
-                                  approval_callback=_approval_callback,
-                                  execution_context=execution_context)
+                                  approval_callback=_approval_callback)
 
 
 # Allowlist: characters that can legitimately appear in directory paths.
@@ -179,132 +177,6 @@ def _validate_workdir(workdir: str) -> str | None:
                 )
         return "Blocked: workdir contains disallowed characters."
     return None
-
-
-_TRACKED_CHANGE_EXTENSIONS = {
-    ".py",
-    ".js",
-    ".ts",
-    ".yaml",
-    ".yml",
-    ".json",
-    ".toml",
-    ".cfg",
-}
-
-_IGNORED_CHANGE_EXTENSIONS = {
-    ".log",
-    ".tmp",
-    ".pyc",
-}
-
-
-def _terminal_tracking_repo_root(cwd: str | None) -> Path | None:
-    """Return the git repo root for the execution cwd, or None outside a repo."""
-    try:
-        probe = subprocess.run(
-            ["git", "rev-parse", "--is-inside-work-tree"],
-            cwd=cwd,
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        if probe.returncode != 0 or probe.stdout.strip() != "true":
-            return None
-
-        repo_root = subprocess.run(
-            ["git", "rev-parse", "--show-toplevel"],
-            cwd=cwd,
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        if repo_root.returncode != 0:
-            return None
-        return Path(repo_root.stdout.strip())
-    except Exception:
-        return None
-
-
-def _capture_git_porcelain(cwd: str | None) -> str:
-    """Capture git porcelain state for opportunistic change tracking."""
-    result = subprocess.run(
-        ["git", "status", "--porcelain"],
-        cwd=cwd,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    return result.stdout or ""
-
-
-def _parse_git_porcelain_map(porcelain: str) -> dict[str, str]:
-    """Map repo-relative paths to their porcelain status lines."""
-    entries: dict[str, str] = {}
-    for line in porcelain.splitlines():
-        if len(line) < 4:
-            continue
-        path_part = line[3:]
-        if " -> " in path_part:
-            path_part = path_part.split(" -> ", 1)[1]
-        if path_part:
-            entries[path_part] = line
-    return entries
-
-
-def _should_track_terminal_change(file_path: str) -> bool:
-    """Track only logic/code/config files, skipping transient artifacts."""
-    suffix = Path(file_path).suffix.lower()
-    if suffix in _IGNORED_CHANGE_EXTENSIONS:
-        return False
-    return suffix in _TRACKED_CHANGE_EXTENSIONS
-
-
-def _track_terminal_side_file_changes(
-    command: str,
-    cwd: str | None,
-    git_state_before: str,
-) -> None:
-    """Record newly dirty git-tracked files after a successful terminal command."""
-    try:
-        repo_root = _terminal_tracking_repo_root(cwd)
-        if repo_root is None:
-            return
-
-        git_state_after = _capture_git_porcelain(str(repo_root))
-        before_map = _parse_git_porcelain_map(git_state_before)
-        after_map = _parse_git_porcelain_map(git_state_after)
-
-        changed_paths = [
-            path for path in after_map
-            if path not in before_map and _should_track_terminal_change(path)
-        ]
-        if not changed_paths:
-            return
-
-        from tools.audit_logger import log_terminal_command
-        from tools.change_tracker import record_change
-
-        for rel_path in changed_paths:
-            abs_path = str((repo_root / rel_path).resolve())
-            diff_result = subprocess.run(
-                ["git", "diff", "--", rel_path],
-                cwd=str(repo_root),
-                capture_output=True,
-                text=True,
-                check=False,
-            )
-            diff_text = diff_result.stdout if diff_result.returncode in (0, 1) else ""
-            record_change(abs_path, "terminal_command", diff_text or "", None)
-
-        log_terminal_command(
-            cmd=str(command)[:500],
-            exit_code=0,
-            pattern="terminal-file-modification",
-            blocked=False,
-        )
-    except Exception as e:
-        logger.warning("Terminal-side change tracking failed: %s", e)
 
 
 def _handle_sudo_failure(output: str, env_type: str) -> str:
@@ -1299,28 +1171,6 @@ def terminal_tool(
         # Note: force parameter is internal only, not exposed to model API
     """
     try:
-        # Pre-flight validation (Layer D)
-        from tools.pre_flight import validate_terminal_command, PreFlightError
-        from tools.pre_flight import format_pre_flight_errors
-        has_errors, errors = validate_terminal_command(command)
-        if has_errors:
-            error_msg = format_pre_flight_errors(errors)
-            # Log pre-flight blocked commands before returning
-            try:
-                from tools.audit_logger import log_terminal_command
-                pattern_id = None
-                if errors:
-                    pattern_id = errors[0].pattern_id if errors else None
-                log_terminal_command(cmd=str(command)[:500], exit_code=-1, pattern=pattern_id, blocked=True)
-            except Exception:
-                pass  # Audit logging should never break the main flow
-            return json.dumps({
-                "output": "",
-                "exit_code": -1,
-                "error": error_msg,
-                "status": "error",
-            }, ensure_ascii=False)
-
         if not isinstance(command, str):
             logger.warning(
                 "Rejected invalid terminal command value: %s",
@@ -1462,23 +1312,9 @@ def terminal_tool(
         # Pre-exec security checks (tirith + dangerous command detection)
         # Skip check if force=True (user has confirmed they want to run it)
         approval_note = None
-        if force:
-            try:
-                from tools.audit_logger import log_terminal_command
-                log_terminal_command(cmd=str(command)[:500], exit_code=0, pattern="force-bypass", blocked=False)
-            except Exception:
-                pass
         if not force:
             approval = _check_all_guards(command, env_type)
             if not approval["approved"]:
-                # Log approval system blocked commands (pre-exec guards)
-                try:
-                    from tools.audit_logger import log_terminal_command
-                    pattern_id = approval.get("pattern_key") or approval.get("pattern")
-                    log_terminal_command(cmd=str(command)[:500], exit_code=-1, pattern=pattern_id, blocked=True)
-                except Exception:
-                    pass  # Audit logging should never break the main flow
-
                 # Check if this is an approval_required (gateway ask mode)
                 if approval.get("status") == "approval_required":
                     return json.dumps({
@@ -1490,8 +1326,7 @@ def terminal_tool(
                         "description": approval.get("description", "command flagged"),
                         "pattern_key": approval.get("pattern_key", ""),
                     }, ensure_ascii=False)
-
-                # Any non-approved result must stop execution before audit or command dispatch.
+                # Command was blocked
                 desc = approval.get("description", "command flagged")
                 fallback_msg = (
                     f"Command denied: {desc}. "
@@ -1503,17 +1338,6 @@ def terminal_tool(
                     "error": approval.get("message", fallback_msg),
                     "status": "blocked"
                 }, ensure_ascii=False)
-
-            # Layer F: Audit guard — check if git commit requires audit first
-            try:
-                from tools.audit_guard import check_audit_requirement, format_audit_block_message
-                audit_approved, audit_reason = check_audit_requirement(command)
-                if not audit_approved and audit_reason:
-                    from tools.audit_logger import log_terminal_command
-                    log_terminal_command(cmd=str(command)[:500], exit_code=-1, pattern="audit-required", blocked=True)
-                    return format_audit_block_message(command, audit_reason)
-            except Exception:
-                pass  # Audit guard should never break the main flow
             # Track whether approval was explicitly granted by the user
             if approval.get("user_approved"):
                 desc = approval.get("description", "flagged as dangerous")
@@ -1633,16 +1457,6 @@ def terminal_tool(
                     "error": f"Failed to start background process: {str(e)}"
                 }, ensure_ascii=False)
         else:
-            tracking_cwd = workdir or cwd
-            tracking_enabled = False
-            git_state_before = ""
-            try:
-                if _terminal_tracking_repo_root(tracking_cwd) is not None:
-                    tracking_enabled = True
-                    git_state_before = _capture_git_porcelain(tracking_cwd)
-            except Exception as e:
-                logger.warning("Pre-exec terminal change snapshot failed: %s", e)
-
             # Run foreground command with retry logic
             max_retries = 3
             retry_count = 0
@@ -1725,31 +1539,12 @@ def terminal_tool(
             if exit_note:
                 result_dict["exit_code_meaning"] = exit_note
 
-            # Log successful command execution (Layer C audit)
-            try:
-                from tools.audit_logger import log_terminal_command
-                log_terminal_command(cmd=str(command)[:500], exit_code=returncode, pattern=None, blocked=False)
-            except Exception:
-                pass  # Audit logging should never break the main flow
-
-            if returncode == 0 and tracking_enabled:
-                _track_terminal_side_file_changes(
-                    command=command,
-                    cwd=tracking_cwd,
-                    git_state_before=git_state_before,
-                )
-
             return json.dumps(result_dict, ensure_ascii=False)
 
     except Exception as e:
         import traceback
         tb_str = traceback.format_exc()
         logger.error("terminal_tool exception:\n%s", tb_str)
-        try:
-            from tools.audit_logger import log_terminal_command
-            log_terminal_command(cmd=str(command)[:500], exit_code=-1, pattern="exception", blocked=False)
-        except Exception:
-            pass
         return json.dumps({
             "output": "",
             "exit_code": -1,
@@ -1978,5 +1773,4 @@ registry.register(
     check_fn=check_terminal_requirements,
     emoji="💻",
     max_result_size_chars=100_000,
-    permission_level="dangerous",
 )
