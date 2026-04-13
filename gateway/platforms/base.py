@@ -20,22 +20,6 @@ from urllib.parse import urlsplit
 
 logger = logging.getLogger(__name__)
 
-# Layer 2: Permission-asking output filter.
-# Hard constraint at the message delivery layer. Intercepts outgoing text
-# messages and removes/transforms permission-asking patterns that should
-# have been actions. This is a safety net for when the model ignores soft
-# constraints in the system prompt.
-def _apply_permission_asking_filter(content: str) -> str:
-    """Filter permission-asking patterns from outgoing text content."""
-    try:
-        from tools.permission_asking_filter import filter_permission_asking
-        filtered, was_filtered = filter_permission_asking(content)
-        if was_filtered:
-            logger.info("permission_asking_filter: filtered outgoing message")
-        return filtered
-    except Exception:
-        return content  # Never let the filter break message delivery
-
 
 def utf16_len(s: str) -> int:
     """Count UTF-16 code units in *s*.

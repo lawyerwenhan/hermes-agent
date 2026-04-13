@@ -3243,7 +3243,8 @@ class AIAgent:
         prompt_parts.append(
             "ACTION-FIRST RULE: Never ask permission to do reversible or low-stakes tasks. "
             "If you can do it, do it. Report results, not plans. "
-            "Asking \"Should I do X?\" or \"Want me to do X?\" is forbidden for green/yellow tasks. "
+            "Asking \"Should I do X?\" or \"Want me to do X?\" is forbidden for tasks that "
+            "are reversible or have no external audience. "
             "Only ask for genuinely irreversible actions or those with external audience impact."
         )
 
