@@ -3237,6 +3237,16 @@ class AIAgent:
         if platform_key in PLATFORM_HINTS:
             prompt_parts.append(PLATFORM_HINTS[platform_key])
 
+        # Layer 1: Action-first enforcement (highest salience position — end of prompt).
+        # Research shows LLMs attend most to the final instructions in a system prompt.
+        # This is a hard constraint that cannot be overridden by earlier conflicting instructions.
+        prompt_parts.append(
+            "ACTION-FIRST RULE: Never ask permission to do reversible or low-stakes tasks. "
+            "If you can do it, do it. Report results, not plans. "
+            "Asking \"Should I do X?\" or \"Want me to do X?\" is forbidden for green/yellow tasks. "
+            "Only ask for genuinely irreversible actions or those with external audience impact."
+        )
+
         return "\n\n".join(p.strip() for p in prompt_parts if p.strip())
 
     # =========================================================================

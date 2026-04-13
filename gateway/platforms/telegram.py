@@ -798,6 +798,15 @@ class TelegramAdapter(BasePlatformAdapter):
         if not content or not content.strip():
             return SendResult(success=True, message_id=None)
         
+        # Layer 2: Apply permission-asking output filter.
+        # Removes "should I do X?" patterns from outgoing messages.
+        # This is a hard constraint that the model cannot bypass.
+        try:
+            from tools.permission_asking_filter import filter_permission_asking
+            content, _ = filter_permission_asking(content)
+        except Exception:
+            pass  # Never let the filter break message delivery
+        
         try:
             # Format and split message if needed
             formatted = self.format_message(content)
