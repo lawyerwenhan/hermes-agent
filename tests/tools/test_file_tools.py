@@ -178,6 +178,113 @@ class TestPatchHandler:
         assert "error" in result
         assert "Unknown mode" in result["error"]
 
+    @patch("tools.file_tools._get_file_ops")
+    @patch("tools.change_tracker.record_change")
+    @patch("tools.audit_logger.log_file_write")
+    def test_replace_mode_tracks_single_file_patch(self, mock_log, mock_record, mock_get):
+        mock_ops = MagicMock()
+        result_obj = MagicMock()
+        result_obj.diff = "--- a/foo.py\n+++ b/foo.py\n@@\n-print('a')\n+print('b')\n"
+        result_obj.files_modified = ["foo.py"]
+        result_obj.files_created = []
+        result_obj.files_deleted = []
+        result_obj.to_dict.return_value = {
+            "success": True,
+            "diff": result_obj.diff,
+            "files_modified": ["foo.py"],
+        }
+        mock_ops.patch_replace.return_value = result_obj
+        mock_get.return_value = mock_ops
+
+        from tools.file_tools import patch_tool
+        result = json.loads(patch_tool(
+            mode="replace", path="foo.py", old_string="print('a')", new_string="print('b')"
+        ))
+
+        assert result["success"] is True
+        mock_log.assert_called_once_with(path="foo.py", exit_code=0, pattern=None, blocked=False)
+        mock_record.assert_called_once()
+        assert mock_record.call_args.kwargs["file_path"] == "foo.py"
+        assert mock_record.call_args.kwargs["operation"] == "patch"
+        assert mock_record.call_args.kwargs["diff_text"] == result_obj.diff
+        assert mock_record.call_args.kwargs["content_hash"]
+
+    @patch("tools.file_tools._get_file_ops")
+    @patch("tools.change_tracker.record_change")
+    @patch("tools.audit_logger.log_file_write")
+    def test_patch_mode_tracks_multi_file_patch(self, mock_log, mock_record, mock_get):
+        mock_ops = MagicMock()
+        result_obj = MagicMock()
+        result_obj.diff = (
+            "--- a/foo.py\n"
+            "+++ b/foo.py\n"
+            "@@\n"
+            "-old\n"
+            "+new\n"
+            "--- /dev/null\n"
+            "+++ b/new.py\n"
+            "+created\n"
+            "--- a/old.py\n"
+            "+++ /dev/null\n"
+            "@@\n"
+            "-removed\n"
+        )
+        result_obj.files_modified = ["foo.py"]
+        result_obj.files_created = ["new.py"]
+        result_obj.files_deleted = ["old.py"]
+        result_obj.to_dict.return_value = {
+            "success": True,
+            "diff": result_obj.diff,
+            "files_modified": ["foo.py"],
+            "files_created": ["new.py"],
+            "files_deleted": ["old.py"],
+        }
+        mock_ops.patch_v4a.return_value = result_obj
+        mock_get.return_value = mock_ops
+
+        from tools.file_tools import patch_tool
+        result = json.loads(patch_tool(mode="patch", patch="*** Begin Patch\n..."))
+
+        assert result["success"] is True
+        assert mock_log.call_count == 3
+        logged_paths = {call.kwargs["path"] for call in mock_log.call_args_list}
+        assert logged_paths == {"foo.py", "new.py", "old.py"}
+        assert mock_record.call_count == 3
+        diff_text_by_path = {
+            call.kwargs["file_path"]: call.kwargs["diff_text"]
+            for call in mock_record.call_args_list
+        }
+        assert "+++ b/foo.py" in diff_text_by_path["foo.py"]
+        assert "+++ b/new.py" in diff_text_by_path["new.py"]
+        assert "+++ /dev/null" in diff_text_by_path["old.py"]
+
+    @patch("tools.file_tools._get_file_ops")
+    @patch("tools.change_tracker.record_change")
+    @patch("tools.audit_logger.log_file_write")
+    def test_patch_failure_logs_blocked_without_tracking(self, mock_log, mock_record, mock_get):
+        mock_ops = MagicMock()
+        result_obj = MagicMock()
+        result_obj.diff = ""
+        result_obj.files_modified = ["foo.py"]
+        result_obj.files_created = []
+        result_obj.files_deleted = []
+        result_obj.to_dict.return_value = {
+            "success": False,
+            "error": "Could not find match for old_string in foo.py",
+            "files_modified": ["foo.py"],
+        }
+        mock_ops.patch_replace.return_value = result_obj
+        mock_get.return_value = mock_ops
+
+        from tools.file_tools import patch_tool
+        result = json.loads(patch_tool(
+            mode="replace", path="foo.py", old_string="x", new_string="y"
+        ).split("\n\n", 1)[0])
+
+        assert result["success"] is False
+        mock_log.assert_called_once_with(path="foo.py", exit_code=-1, pattern="patch_failed", blocked=True)
+        mock_record.assert_not_called()
+
 
 class TestSearchHandler:
     @patch("tools.file_tools._get_file_ops")
@@ -309,6 +416,5 @@ class TestSearchHints:
         raw = search_tool(pattern="foo", offset=50, limit=50)
         assert "[Hint:" in raw
         assert "offset=100" in raw
-
 
 

@@ -2,6 +2,7 @@
 """File Tools Module - LLM agent file manipulation tools."""
 
 import errno
+import hashlib
 import json
 import logging
 import os
@@ -128,6 +129,99 @@ def _is_expected_write_exception(exc: Exception) -> bool:
     if isinstance(exc, OSError) and exc.errno in _EXPECTED_WRITE_ERRNOS:
         return True
     return False
+
+
+def _hash_diff_text(diff_text: str) -> str | None:
+    """Return a stable short hash for diff text."""
+    if not diff_text:
+        return None
+    return hashlib.sha256(diff_text.encode("utf-8")).hexdigest()[:16]
+
+
+def _strip_diff_path_prefix(path_text: str) -> str:
+    """Normalize unified-diff path headers to a repository-relative path."""
+    path_text = path_text.strip()
+    if not path_text:
+        return path_text
+    path_text = path_text.split("\t", 1)[0].split(" ", 1)[0]
+    if path_text.startswith(("a/", "b/")):
+        return path_text[2:]
+    return path_text
+
+
+def _expand_patch_result_paths(result) -> list[str]:
+    """Return all concrete paths touched by a patch result."""
+    paths: list[str] = []
+    for entry in getattr(result, "files_modified", []) or []:
+        if " -> " in entry:
+            src, dst = entry.split(" -> ", 1)
+            for candidate in (src.strip(), dst.strip()):
+                if candidate:
+                    paths.append(candidate)
+        elif entry:
+            paths.append(entry)
+    for attr in ("files_created", "files_deleted"):
+        for entry in getattr(result, attr, []) or []:
+            if entry:
+                paths.append(entry)
+    return list(dict.fromkeys(paths))
+
+
+def _extract_patch_diffs(result) -> dict[str, str]:
+    """Map each touched path in a PatchResult to its diff text."""
+    combined_diff = getattr(result, "diff", "") or ""
+    touched_paths = _expand_patch_result_paths(result)
+    if not combined_diff.strip():
+        return {path: "" for path in touched_paths}
+
+    path_diffs: dict[str, str] = {}
+    current_lines: list[str] = []
+    current_path: str | None = None
+    from_path: str | None = None
+
+    def _flush_current() -> None:
+        nonlocal current_lines, current_path
+        if current_path and current_lines:
+            path_diffs[current_path] = "".join(current_lines)
+        current_lines = []
+        current_path = None
+
+    for line in combined_diff.splitlines(keepends=True):
+        if line.startswith("# Moved: "):
+            _flush_current()
+            move_text = line[len("# Moved: "):].strip()
+            if " -> " in move_text:
+                src, dst = move_text.split(" -> ", 1)
+                move_diff = line.rstrip("\n")
+                if src.strip():
+                    path_diffs[src.strip()] = move_diff
+                if dst.strip():
+                    path_diffs[dst.strip()] = move_diff
+            continue
+        if line.startswith("--- "):
+            _flush_current()
+            from_path = _strip_diff_path_prefix(line[4:])
+            current_lines = [line]
+            continue
+        if line.startswith("+++ ") and current_lines:
+            to_path = _strip_diff_path_prefix(line[4:])
+            if to_path == "/dev/null":
+                current_path = from_path
+            else:
+                current_path = to_path
+            current_lines.append(line)
+            continue
+        if current_lines:
+            current_lines.append(line)
+
+    _flush_current()
+
+    if len(touched_paths) == 1 and not path_diffs:
+        return {touched_paths[0]: combined_diff}
+
+    for path in touched_paths:
+        path_diffs.setdefault(path, combined_diff)
+    return path_diffs
 
 
 _file_ops_lock = threading.Lock()
@@ -653,6 +747,11 @@ def patch_tool(mode: str = "replace", path: str = None, old_string: str = None,
     for _p in _paths_to_check:
         sensitive_err = _check_sensitive_path(_p)
         if sensitive_err:
+            try:
+                from tools.audit_logger import log_file_write
+                log_file_write(path=_p, exit_code=-1, pattern="sensitive_path", blocked=True)
+            except Exception:
+                pass
             return tool_error(sensitive_err)
     try:
         # Check staleness for all files this patch will touch.
@@ -678,6 +777,33 @@ def patch_tool(mode: str = "replace", path: str = None, old_string: str = None,
             return tool_error(f"Unknown mode: {mode}")
         
         result_dict = result.to_dict()
+        touched_paths = _expand_patch_result_paths(result)
+        if result_dict.get("error"):
+            try:
+                from tools.audit_logger import log_file_write
+                blocked_paths = touched_paths or _paths_to_check or ([path] if path else [])
+                for _p in blocked_paths:
+                    log_file_write(path=_p, exit_code=-1, pattern="patch_failed", blocked=True)
+            except Exception:
+                pass
+        else:
+            try:
+                from tools.audit_logger import log_file_write
+                from tools.change_tracker import record_change
+
+                diff_by_path = _extract_patch_diffs(result)
+                success_paths = touched_paths or _paths_to_check or ([path] if path else [])
+                for _p in success_paths:
+                    log_file_write(path=_p, exit_code=0, pattern=None, blocked=False)
+                    diff_text = diff_by_path.get(_p, result_dict.get("diff", ""))
+                    record_change(
+                        file_path=_p,
+                        operation="patch",
+                        diff_text=diff_text,
+                        content_hash=_hash_diff_text(diff_text),
+                    )
+            except Exception:
+                pass
         if stale_warnings:
             result_dict["_warning"] = stale_warnings[0] if len(stale_warnings) == 1 else " | ".join(stale_warnings)
         # Refresh stored timestamps for all successfully-patched paths so
