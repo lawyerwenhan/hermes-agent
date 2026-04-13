@@ -2384,7 +2384,13 @@ def save_config(config: Dict[str, Any]):
 
 
 def load_env() -> Dict[str, str]:
-    """Load environment variables from ~/.hermes/.env."""
+    """Load environment variables from ~/.hermes/.env.
+
+    Sanitizes lines before parsing so that corrupted files (e.g.
+    concatenated KEY=VALUE pairs on a single line) are handled
+    gracefully instead of producing mangled values such as duplicated
+    bot tokens.  See #8908.
+    """
     env_path = get_env_path()
     env_vars = {}
     
@@ -2393,17 +2399,21 @@ def load_env() -> Dict[str, str]:
         # fail on UTF-8 .env files. Use explicit UTF-8 only on Windows.
         open_kw = {"encoding": "utf-8", "errors": "replace"} if _IS_WINDOWS else {}
         with open(env_path, **open_kw) as f:
-            for line in f:
-                line = line.strip()
-                if line and not line.startswith('#') and '=' in line:
-                    key, _, value = line.partition('=')
-                    env_vars[key.strip()] = value.strip().strip('"\'')
+            raw_lines = f.readlines()
+        # Sanitize before parsing: split concatenated lines & drop stale
+        # placeholders so corrupted .env files don't produce invalid tokens.
+        lines = _sanitize_env_lines(raw_lines)
+        for line in lines:
+            line = line.strip()
+            if line and not line.startswith('#') and '=' in line:
+                key, _, value = line.partition('=')
+                env_vars[key.strip()] = value.strip().strip('"\'')
     
     return env_vars
 
 
 def _sanitize_env_lines(lines: list) -> list:
-    """Fix corrupted .env lines before writing.
+    """Fix corrupted .env lines before reading or writing.
 
     Handles two known corruption patterns:
     1. Concatenated KEY=VALUE pairs on a single line (missing newline between
@@ -2634,6 +2644,28 @@ def save_env_value_secure(key: str, value: str) -> Dict[str, Any]:
         "validated": False,
     }
 
+
+
+def reload_env() -> int:
+    """Re-read ~/.hermes/.env into os.environ. Returns count of vars updated.
+
+    Adds/updates vars that changed and removes vars that were deleted from
+    the .env file (but only vars known to Hermes — OPTIONAL_ENV_VARS and
+    _EXTRA_ENV_KEYS — to avoid clobbering unrelated environment).
+    """
+    env_vars = load_env()
+    known_keys = set(OPTIONAL_ENV_VARS.keys()) | _EXTRA_ENV_KEYS
+    count = 0
+    for key, value in env_vars.items():
+        if os.environ.get(key) != value:
+            os.environ[key] = value
+            count += 1
+    # Remove known Hermes vars that are no longer in .env
+    for key in known_keys:
+        if key not in env_vars and key in os.environ:
+            del os.environ[key]
+            count += 1
+    return count
 
 
 def get_env_value(key: str) -> Optional[str]:

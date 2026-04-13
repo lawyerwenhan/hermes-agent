@@ -5420,13 +5420,22 @@ class AIAgent:
                 # a new API call, creating a duplicate message.  Return a
                 # partial "stop" response instead so the outer loop treats this
                 # turn as complete (no retry, no fallback).
+                # Recover whatever content was already streamed to the user.
+                # _current_streamed_assistant_text accumulates text fired
+                # through _fire_stream_delta, so it has exactly what the
+                # user saw before the connection died.
+                _partial_text = (
+                    getattr(self, "_current_streamed_assistant_text", "") or ""
+                ).strip() or None
                 logger.warning(
                     "Partial stream delivered before error; returning stub "
-                    "response to prevent duplicate messages: %s",
+                    "response with %s chars of recovered content to prevent "
+                    "duplicate messages: %s",
+                    len(_partial_text or ""),
                     result["error"],
                 )
                 _stub_msg = SimpleNamespace(
-                    role="assistant", content=None, tool_calls=None,
+                    role="assistant", content=_partial_text, tool_calls=None,
                     reasoning_content=None,
                 )
                 return SimpleNamespace(
@@ -9918,6 +9927,30 @@ class AIAgent:
                     
                     # Check if response only has think block with no actual content after it
                     if not self._has_content_after_think_block(final_response):
+                        # ── Partial stream recovery ─────────────────────
+                        # If content was already streamed to the user before
+                        # the connection died, use it as the final response
+                        # instead of falling through to prior-turn fallback
+                        # or wasting API calls on retries.
+                        _partial_streamed = (
+                            getattr(self, "_current_streamed_assistant_text", "") or ""
+                        )
+                        if self._has_content_after_think_block(_partial_streamed):
+                            _turn_exit_reason = "partial_stream_recovery"
+                            _recovered = self._strip_think_blocks(_partial_streamed).strip()
+                            logger.info(
+                                "Partial stream content delivered (%d chars) "
+                                "— using as final response",
+                                len(_recovered),
+                            )
+                            self._emit_status(
+                                "↻ Stream interrupted — using delivered content "
+                                "as final response"
+                            )
+                            final_response = _recovered
+                            self._response_was_previewed = True
+                            break
+
                         # If the previous turn already delivered real content alongside
                         # tool calls (e.g. "You're welcome!" + memory save), the model
                         # has nothing more to say. Use the earlier content immediately
@@ -10185,17 +10218,11 @@ class AIAgent:
         if final_response is None and (
             api_call_count >= self.max_iterations
             or self.iteration_budget.remaining <= 0
-        ) and not self._budget_exhausted_injected:
-            # Budget exhausted but we haven't tried asking the model to
-            # summarise yet.  Inject a user message and give it one grace
-            # API call to produce a text response.
-            self._budget_exhausted_injected = True
-            self._budget_grace_call = True
-            _grace_msg = (
-                "Your tool budget ran out. Please give me the information "
-                "or actions you've completed so far."
-            )
-            messages.append({"role": "user", "content": _grace_msg})
+        ):
+            # Budget exhausted — ask the model for a summary via one extra
+            # API call with tools stripped.  _handle_max_iterations injects a
+            # user message and makes a single toolless request.
+            _turn_exit_reason = f"max_iterations_reached({api_call_count}/{self.max_iterations})"
             self._emit_status(
                 f"⚠️ Iteration budget exhausted ({api_call_count}/{self.max_iterations}) "
                 "— asking model to summarise"
@@ -10205,14 +10232,6 @@ class AIAgent:
                     f"\n⚠️  Iteration budget exhausted ({api_call_count}/{self.max_iterations}) "
                     "— requesting summary..."
                 )
-
-        if final_response is None and (
-            api_call_count >= self.max_iterations
-            or self.iteration_budget.remaining <= 0
-        ) and not self._budget_grace_call:
-            _turn_exit_reason = f"max_iterations_reached({api_call_count}/{self.max_iterations})"
-            if self.iteration_budget.remaining <= 0 and not self.quiet_mode:
-                print(f"\n⚠️  Iteration budget exhausted ({self.iteration_budget.used}/{self.iteration_budget.max_total} iterations used)")
             final_response = self._handle_max_iterations(messages, api_call_count)
         
         # Determine if conversation completed successfully

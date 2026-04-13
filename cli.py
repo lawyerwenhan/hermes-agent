@@ -2999,8 +2999,10 @@ class HermesCLI:
                 )
 
         # Warn if the configured model is a Nous Hermes LLM (not agentic)
+        from hermes_cli.model_switch import is_nous_hermes_non_agentic
+
         model_name = getattr(self, "model", "") or ""
-        if "hermes" in model_name.lower():
+        if is_nous_hermes_non_agentic(model_name):
             self.console.print()
             self.console.print(
                 "[bold yellow]⚠  Nous Research Hermes 3 & 4 models are NOT agentic and are not "
@@ -5419,6 +5421,10 @@ class HermesCLI:
             self._handle_paste_command()
         elif canonical == "image":
             self._handle_image_command(cmd_original)
+        elif canonical == "reload":
+            from hermes_cli.config import reload_env
+            count = reload_env()
+            print(f"  Reloaded .env ({count} var(s) updated)")
         elif canonical == "reload-mcp":
             with self._busy_command(self._slow_command_status(cmd_original)):
                 self._reload_mcp()
@@ -7837,6 +7843,17 @@ class HermesCLI:
             if self.bell_on_complete:
                 sys.stdout.write("\a")
                 sys.stdout.flush()
+
+            # Notify when iteration budget was hit
+            if result and not result.get("completed") and not result.get("interrupted"):
+                _api_calls = result.get("api_calls", 0)
+                if _api_calls >= getattr(self.agent, "max_iterations", 90):
+                    _max_iter = getattr(self.agent, "max_iterations", 90)
+                    _cprint(
+                        f"\n{_DIM}⚠ Iteration budget reached "
+                        f"({_api_calls}/{_max_iter}) — "
+                        f"response may be incomplete{_RST}"
+                    )
 
             # Speak response aloud if voice TTS is enabled
             # Skip batch TTS when streaming TTS already handled it
