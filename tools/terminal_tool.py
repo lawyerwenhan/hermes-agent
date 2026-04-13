@@ -1366,17 +1366,7 @@ def terminal_tool(
                         "pattern_key": approval.get("pattern_key", ""),
                     }, ensure_ascii=False)
 
-            # Layer F: Audit guard — check if git commit requires audit first
-            try:
-                from tools.audit_guard import check_audit_requirement, format_audit_block_message
-                audit_approved, audit_reason = check_audit_requirement(command)
-                if not audit_approved and audit_reason:
-                    from tools.audit_logger import log_terminal_command
-                    log_terminal_command(cmd=str(command)[:500], exit_code=-1, pattern="audit-required", blocked=True)
-                    return format_audit_block_message(command, audit_reason)
-            except Exception:
-                pass  # Audit guard should never break the main flow
-                # Command was blocked
+                # Any non-approved result must stop execution before audit or command dispatch.
                 desc = approval.get("description", "command flagged")
                 fallback_msg = (
                     f"Command denied: {desc}. "
@@ -1388,6 +1378,17 @@ def terminal_tool(
                     "error": approval.get("message", fallback_msg),
                     "status": "blocked"
                 }, ensure_ascii=False)
+
+            # Layer F: Audit guard — check if git commit requires audit first
+            try:
+                from tools.audit_guard import check_audit_requirement, format_audit_block_message
+                audit_approved, audit_reason = check_audit_requirement(command)
+                if not audit_approved and audit_reason:
+                    from tools.audit_logger import log_terminal_command
+                    log_terminal_command(cmd=str(command)[:500], exit_code=-1, pattern="audit-required", blocked=True)
+                    return format_audit_block_message(command, audit_reason)
+            except Exception:
+                pass  # Audit guard should never break the main flow
             # Track whether approval was explicitly granted by the user
             if approval.get("user_approved"):
                 desc = approval.get("description", "flagged as dangerous")
