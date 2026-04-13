@@ -12,6 +12,7 @@ import json
 import hmac
 import hashlib
 import os
+import secrets
 import threading
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
@@ -20,28 +21,45 @@ from typing import List, Optional
 _write_lock = threading.Lock()
 
 
+def _get_audit_dir() -> Path:
+    """Get the audit state directory under the active HERMES_HOME."""
+    from hermes_constants import get_hermes_home
+
+    audit_dir = Path(get_hermes_home()) / "audit"
+    audit_dir.mkdir(parents=True, exist_ok=True)
+    return audit_dir
+
+
 def _get_hmac_key() -> bytes:
-    """Get HMAC key derived from machine identity. Stable across restarts."""
-    import hashlib
-    # Derive from username + hostname — stable, no file dependency
-    import getpass
-    try:
-        user = getpass.getuser()
-    except Exception:
-        user = "unknown"
-    import socket
-    hostname = socket.gethostname()
-    # Combine with a fixed salt for Hermes audit passports
-    identity = f"hermes-audit:{user}@{hostname}".encode("utf-8")
-    return hashlib.sha256(identity).digest()
+    """Get the persisted audit HMAC key, creating it on first use."""
+    secret_path = _get_audit_dir() / ".audit_secret"
+
+    with _write_lock:
+        while True:
+            try:
+                key = secret_path.read_bytes()
+                if key:
+                    os.chmod(secret_path, 0o600)
+                    return key
+            except FileNotFoundError:
+                pass
+
+            key = secrets.token_bytes(32)
+            try:
+                fd = os.open(secret_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            except FileExistsError:
+                continue
+            try:
+                with os.fdopen(fd, "wb") as f:
+                    f.write(key)
+            finally:
+                os.chmod(secret_path, 0o600)
+            return key
 
 
 def _get_passports_path() -> Path:
     """Get the passports log file path."""
-    from hermes_constants import get_hermes_home
-    audit_dir = Path(get_hermes_home()) / "audit"
-    audit_dir.mkdir(parents=True, exist_ok=True)
-    return audit_dir / "passports.jsonl"
+    return _get_audit_dir() / "passports.jsonl"
 
 
 def _get_timestamp() -> str:
@@ -50,14 +68,41 @@ def _get_timestamp() -> str:
     return datetime.now(tz_utc8).strftime("%Y-%m-%dT%H:%M:%S%z")
 
 
+def _normalize_string_list(values: Optional[List[str]]) -> List[str]:
+    """Normalize list-like passport fields into sorted strings."""
+    if not values:
+        return []
+    return sorted(str(value) for value in values)
+
+
+def _build_v1_sign_data(entry: dict) -> str:
+    """Build the legacy HMAC payload for backward-compatible verification."""
+    return "{}|{}|{}".format(
+        entry.get("passport_id", ""),
+        entry.get("timestamp", ""),
+        "|".join(_normalize_string_list(entry.get("files_audited", []))),
+    )
+
+
+def _build_v2_sign_data(entry: dict) -> str:
+    """Build the canonical HMAC payload for v2 passports."""
+    sign_payload = {
+        "version": "v2",
+        "passport_id": entry.get("passport_id", ""),
+        "timestamp": entry.get("timestamp", ""),
+        "files_audited": _normalize_string_list(entry.get("files_audited", [])),
+        "diff_hashes_covered": _normalize_string_list(entry.get("diff_hashes_covered", [])),
+        "audit_tool": entry.get("audit_tool", ""),
+        "adversarial_prompt": entry.get("adversarial_prompt", False),
+    }
+    return json.dumps(sign_payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+
+
 def _sign_passport(entry: dict) -> str:
     """Create HMAC signature for passport integrity."""
     key = _get_hmac_key()
-    sign_data = "{}|{}|{}".format(
-        entry.get("passport_id", ""),
-        entry.get("timestamp", ""),
-        "|".join(sorted(entry.get("files_audited", [])))
-    )
+    version = entry.get("version")
+    sign_data = _build_v2_sign_data(entry) if version == "v2" else _build_v1_sign_data(entry)
     return hmac.new(key, sign_data.encode("utf-8"), hashlib.sha256).hexdigest()[:32]
 
 
@@ -66,6 +111,9 @@ def verify_passport_signature(entry: dict) -> bool:
     try:
         stored_sig = entry.get("signature", "")
         if not stored_sig:
+            return False
+        version = entry.get("version")
+        if version not in (None, "v1", "v2"):
             return False
         expected_sig = _sign_passport(entry)
         return hmac.compare_digest(stored_sig, expected_sig)
@@ -84,6 +132,7 @@ def record_audit_passport(
     """Record an audit passport entry."""
     try:
         entry = {
+            "version": "v2",
             "timestamp": _get_timestamp(),
             "passport_id": passport_id,
             "files_audited": sorted(files_audited),
