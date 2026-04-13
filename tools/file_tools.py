@@ -697,18 +697,22 @@ def write_file_tool(path: str, content: str, task_id: str = "default") -> str:
         file_ops = _get_file_ops(task_id)
         result = file_ops.write_file(path, content)
         result_dict = result.to_dict()
-        # Log successful file write (Layer C audit)
+        # Log file write result (Layer C audit) — check for errors first
         try:
             from tools.audit_logger import log_file_write
-            log_file_write(path=path, exit_code=0, pattern=None, blocked=False)
+            if result_dict.get("error"):
+                log_file_write(path=path, exit_code=-1, pattern="write_failed", blocked=False)
+            else:
+                log_file_write(path=path, exit_code=0, pattern=None, blocked=False)
         except Exception:
             pass  # Audit logging should never break the main flow
-        # Track file change for Layer F audit enforcement
-        try:
-            from tools.change_tracker import record_change
-            record_change(file_path=path, operation="write_file", diff_text=content)
-        except Exception:
-            pass  # Change tracking should never break the main flow
+        # Track file change for Layer F audit enforcement — only on success
+        if not result_dict.get("error"):
+            try:
+                from tools.change_tracker import record_change
+                record_change(file_path=path, operation="write_file", diff_text=content)
+            except Exception:
+                pass  # Change tracking should never break the main flow
         if stale_warning:
             result_dict["_warning"] = stale_warning
         # Refresh the stored timestamp so consecutive writes by this
