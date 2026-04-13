@@ -484,6 +484,27 @@ def handle_function_call(
     # Coerce string arguments to their schema-declared types (e.g. "42"→42)
     function_args = coerce_tool_args(function_name, function_args)
 
+    # ── Permission enforcement (three-tier: green/yellow/red/block) ──────
+    # Runs at Python code layer — model cannot bypass this.
+    try:
+        from tools.permission_enforcer import classify_tool_call, RED, BLOCK
+        level, reason = classify_tool_call(function_name, function_args)
+
+        if level == BLOCK:
+            logger.warning("[PermissionEnforcer] BLOCKED: %s %s — %s", function_name, function_args.get("command", function_args.get("path", ""))[:100], reason)
+            return json.dumps({"error": f"⛔ {reason}"}, ensure_ascii=False)
+
+        if level == RED:
+            logger.warning("[PermissionEnforcer] RED (needs confirmation): %s %s — %s", function_name, function_args.get("command", function_args.get("path", ""))[:100], reason)
+            # Return a clear error — the model should use clarify() to ask user
+            return json.dumps({"error": f"🔴 {reason}"}, ensure_ascii=False)
+
+        # GREEN and YELLOW pass through; YELLOW actions are logged for reporting
+        if level == "yellow":
+            logger.info("[PermissionEnforcer] YELLOW (auto-action): %s %s — %s", function_name, function_args.get("command", function_args.get("path", ""))[:100], reason)
+    except ImportError:
+        pass  # permission_enforcer not available (shouldn't happen)
+
     # Notify the read-loop tracker when a non-read/search tool runs,
     # so the *consecutive* counter resets (reads after other work are fine).
     if function_name not in _READ_SEARCH_TOOLS:
