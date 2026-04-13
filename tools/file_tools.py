@@ -14,6 +14,11 @@ from agent.redact import redact_sensitive_text
 logger = logging.getLogger(__name__)
 
 
+def tool_error(message: str) -> str:
+    """Format error message as JSON."""
+    return json.dumps({"error": message, "success": False}, ensure_ascii=False)
+
+
 _EXPECTED_WRITE_ERRNOS = {errno.EACCES, errno.EPERM, errno.EROFS}
 
 # ---------------------------------------------------------------------------
@@ -570,6 +575,13 @@ def _check_file_staleness(filepath: str, task_id: str) -> str | None:
 
 def write_file_tool(path: str, content: str, task_id: str = "default") -> str:
     """Write content to a file."""
+    # Pre-flight validation (Layer D+E)
+    from tools.pre_flight import validate_file_write, format_pre_flight_errors
+    has_errors, errors = validate_file_write(path, content)
+    if has_errors:
+        error_msg = format_pre_flight_errors(errors)
+        return tool_error(error_msg)
+    
     sensitive_err = _check_sensitive_path(path)
     if sensitive_err:
         return tool_error(sensitive_err)

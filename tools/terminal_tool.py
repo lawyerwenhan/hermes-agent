@@ -1172,6 +1172,19 @@ def terminal_tool(
         # Note: force parameter is internal only, not exposed to model API
     """
     try:
+        # Pre-flight validation (Layer D)
+        from tools.pre_flight import validate_terminal_command, PreFlightError
+        from tools.pre_flight import format_pre_flight_errors
+        has_errors, errors = validate_terminal_command(command)
+        if has_errors:
+            error_msg = format_pre_flight_errors(errors)
+            return json.dumps({
+                "output": "",
+                "exit_code": -1,
+                "error": error_msg,
+                "status": "error",
+            }, ensure_ascii=False)
+        
         if not isinstance(command, str):
             logger.warning(
                 "Rejected invalid terminal command value: %s",
