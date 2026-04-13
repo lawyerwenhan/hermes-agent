@@ -37,7 +37,13 @@ def _get_timestamp() -> str:
 
 
 def _truncate_cmd(cmd: str, max_len: int = 500) -> str:
-    """Truncate command if too long."""
+    """Escape control characters and truncate command if too long."""
+    cmd = (
+        cmd.replace("\\", "\\\\")
+        .replace("\n", "\\n")
+        .replace("\r", "\\r")
+        .replace("\t", "\\t")
+    )
     if len(cmd) <= max_len:
         return cmd
     return cmd[:max_len] + "..."
@@ -61,7 +67,7 @@ def log_terminal_command(
     try:
         timestamp = _get_timestamp()
         truncated_cmd = _truncate_cmd(cmd)
-        pattern_str = pattern if pattern else "-"
+        pattern_str = _truncate_cmd(pattern) if pattern else "-"
 
         blocked_str = "yes" if blocked else "no"
         log_line = f"{timestamp} | cmd: {truncated_cmd} | exit: {exit_code} | pattern: {pattern_str} | blocked: {blocked_str}\n"
@@ -92,10 +98,11 @@ def log_file_write(
     """
     try:
         timestamp = _get_timestamp()
-        pattern_str = pattern if pattern else "-"
+        safe_path = _truncate_cmd(path)
+        pattern_str = _truncate_cmd(pattern) if pattern else "-"
 
         blocked_str = "yes" if blocked else "no"
-        log_line = f"{timestamp} | write: {path} | exit: {exit_code} | pattern: {pattern_str} | blocked: {blocked_str}\n"
+        log_line = f"{timestamp} | write: {safe_path} | exit: {exit_code} | pattern: {pattern_str} | blocked: {blocked_str}\n"
 
         log_path = _get_audit_log_path()
         with _write_lock:

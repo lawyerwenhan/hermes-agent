@@ -30,6 +30,11 @@ def _get_audit_dir() -> Path:
     return audit_dir
 
 
+def _normalize_file_path(file_path: str) -> str:
+    """Normalize file paths consistently with change_tracker."""
+    return os.path.normpath(os.path.abspath(file_path))
+
+
 def _get_hmac_key() -> bytes:
     """Get the persisted audit HMAC key, creating it on first use."""
     secret_path = _get_audit_dir() / ".audit_secret"
@@ -135,7 +140,7 @@ def record_audit_passport(
             "version": "v2",
             "timestamp": _get_timestamp(),
             "passport_id": passport_id,
-            "files_audited": sorted(files_audited),
+            "files_audited": sorted(_normalize_file_path(path) for path in files_audited),
             "diff_hashes_covered": sorted(diff_hashes_covered),
             "audit_tool": audit_tool,
             "adversarial_prompt": adversarial_prompt,
@@ -186,11 +191,13 @@ def get_recent_passports(limit: int = 50) -> list:
 def is_change_audited(file_path: str, diff_hash: Optional[str] = None) -> bool:
     """Check if a specific file change has been covered by a recent audit passport."""
     try:
+        normalized_path = _normalize_file_path(file_path)
         passports = get_recent_passports(limit=20)
         for passport in passports:
             if not verify_passport_signature(passport):
                 continue
-            if file_path in passport.get("files_audited", []):
+            normalized_files = {_normalize_file_path(path) for path in passport.get("files_audited", [])}
+            if normalized_path in normalized_files:
                 return True
             if diff_hash and diff_hash in passport.get("diff_hashes_covered", []):
                 return True

@@ -47,10 +47,10 @@ _CHINESE_SENTENCE_PATTERNS = [
 _ENGLISH_SENTENCE_PATTERNS = [
     # Complete-sentence permission-asking (must end with ?)
     r'Should I (?:do|start|begin|proceed|continue) (?:this|it|now|later|today|tomorrow)\??',
-    r'Do you want me to (?:do|start|begin|continue|proceed)\??',
-    r'Would you like me to (?:do|start|begin|continue)\??',
-    r'Shall I (?:do|start|begin|proceed)\??',
-    r'Want me to (?:do|start|begin|continue)\??',
+    r'Do you want me to (?:do|start|begin|continue|proceed)(?: (?:this|it|now|later|today|tomorrow))?\??',
+    r'Would you like me to (?:do|start|begin|continue)(?: (?:this|it|now|later|today|tomorrow))?\??',
+    r'Shall I (?:do|start|begin|proceed)(?: (?:this|it|now|later|today|tomorrow))?\??',
+    r'Want me to (?:do|start|begin|continue)(?: (?:this|it|now|later|today|tomorrow))?\??',
     r'I can (?:do|start|begin) this (?:now |later |tomorrow |today )?if you want\.?',
 ]
 
@@ -143,10 +143,13 @@ def filter_permission_asking(text: str) -> Tuple[str, bool]:
 
     filtered = '\n'.join(cleaned_lines).strip()
 
-    # If filtering removed everything, return original (safety net)
+    was_filtered = (filtered != original)
+
+    # If filtering removed everything, return a neutral action marker instead
     if not filtered:
-        logger.warning("permission_asking_filter: would have emptied message, returning original")
+        if was_filtered:
+            logger.warning("permission_asking_filter: filtered entire permission-asking message")
+            return "(action taken)", True
         return original, False
 
-    was_filtered = (filtered != original)
     return filtered, was_filtered

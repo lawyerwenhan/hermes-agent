@@ -13,6 +13,7 @@ import re
 import hashlib
 import json
 import threading
+import fcntl
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Optional
@@ -40,6 +41,35 @@ def _get_changes_path() -> Path:
     audit_dir = get_hermes_home() / "audit"
     audit_dir.mkdir(parents=True, exist_ok=True)
     return audit_dir / "changes.jsonl"
+
+
+def _get_changes_lock_path() -> Path:
+    """Get the interprocess lock path for the changes log."""
+    return _get_changes_path().with_suffix(".lock")
+
+
+def _normalize_file_path(file_path: str) -> str:
+    """Normalize a file path consistently across tracking and auditing."""
+    return os.path.normpath(os.path.abspath(file_path))
+
+
+def _append_change_entry(changes_path: Path, entry: dict) -> None:
+    """Append an entry while holding the interprocess lock."""
+    with open(changes_path, "a", encoding="utf-8") as f:
+        f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+
+
+def _rewrite_changes_file(changes_path: Path, lines: list[str]) -> None:
+    """Atomically rewrite the changes file while holding the interprocess lock."""
+    tmp_path = changes_path.with_suffix(".tmp")
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        if lines:
+            f.write("\n".join(lines) + "\n")
+        else:
+            f.write("")
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp_path, changes_path)
 
 
 def _get_timestamp() -> str:
@@ -139,7 +169,7 @@ def record_change(
     """
     try:
         # Normalize path to avoid duplicate entries
-        file_path = os.path.normpath(os.path.abspath(file_path))
+        file_path = _normalize_file_path(file_path)
         
         change_type = classify_change(diff_text, file_path)
 
@@ -159,8 +189,13 @@ def record_change(
 
         changes_path = _get_changes_path()
         with _write_lock:
-            with open(changes_path, "a", encoding="utf-8") as f:
-                f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+            lock_path = _get_changes_lock_path()
+            with open(lock_path, "a+", encoding="utf-8") as lock_file:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+                try:
+                    _append_change_entry(changes_path, entry)
+                finally:
+                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
     except Exception:
         # Never let tracking break file operations
         pass
@@ -179,17 +214,23 @@ def get_unaudited_logic_changes() -> list:
 
         unaudited = []
         with _write_lock:
-            with open(changes_path, "r", encoding="utf-8") as f:
-                for line in f:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        entry = json.loads(line)
-                        if not entry.get("audited", False) and entry.get("change_type") in ("logic", "config"):
-                            unaudited.append(entry)
-                    except json.JSONDecodeError:
-                        continue
+            lock_path = _get_changes_lock_path()
+            with open(lock_path, "a+", encoding="utf-8") as lock_file:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+                try:
+                    with open(changes_path, "r", encoding="utf-8") as f:
+                        for line in f:
+                            line = line.strip()
+                            if not line:
+                                continue
+                            try:
+                                entry = json.loads(line)
+                                if not entry.get("audited", False) and entry.get("change_type") in ("logic", "config"):
+                                    unaudited.append(entry)
+                            except json.JSONDecodeError:
+                                continue
+                finally:
+                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
         return unaudited
     except Exception:
@@ -213,30 +254,37 @@ def mark_changes_audited(passport_id: str, files_audited: list, diff_hashes: lis
         if not changes_path.exists():
             return 0
 
+        normalized_files = {_normalize_file_path(path) for path in files_audited}
+        diff_hash_set = set(diff_hashes)
         updated = 0
         lines = []
         with _write_lock:
-            with open(changes_path, "r", encoding="utf-8") as f:
-                for line in f:
-                    line_stripped = line.strip()
-                    if not line_stripped:
-                        continue
-                    try:
-                        entry = json.loads(line_stripped)
-                        # Match by file path or diff hash
-                        if (entry.get("file") in files_audited or
-                            entry.get("diff_hash") in diff_hashes):
-                            if not entry.get("audited", False):
-                                entry["audited"] = True
-                                entry["passport_id"] = passport_id
-                                updated += 1
-                        lines.append(json.dumps(entry, ensure_ascii=False))
-                    except json.JSONDecodeError:
-                        lines.append(line_stripped)
+            lock_path = _get_changes_lock_path()
+            with open(lock_path, "a+", encoding="utf-8") as lock_file:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+                try:
+                    with open(changes_path, "r", encoding="utf-8") as f:
+                        for line in f:
+                            line_stripped = line.strip()
+                            if not line_stripped:
+                                continue
+                            try:
+                                entry = json.loads(line_stripped)
+                                if (
+                                    entry.get("file") in normalized_files
+                                    and entry.get("diff_hash") in diff_hash_set
+                                    and not entry.get("audited", False)
+                                ):
+                                    entry["audited"] = True
+                                    entry["passport_id"] = passport_id
+                                    updated += 1
+                                lines.append(json.dumps(entry, ensure_ascii=False))
+                            except json.JSONDecodeError:
+                                lines.append(line_stripped)
 
-            # Rewrite file with updated entries
-            with open(changes_path, "w", encoding="utf-8") as f:
-                f.write("\n".join(lines) + "\n")
+                    _rewrite_changes_file(changes_path, lines)
+                finally:
+                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
         return updated
     except Exception:

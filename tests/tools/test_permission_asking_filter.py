@@ -19,18 +19,18 @@ class TestChinesePatterns:
         assert "好的" in filtered
 
     def test_yaobuya_zuo(self):
-        """要不要做？ as entire message → safety net returns original."""
+        """Pure permission-asking should collapse to a neutral action message."""
         text = "要不要做？"
         filtered, was = filter_permission_asking(text)
-        # Entire message is asking permission → safety net returns original
-        assert filtered == text  # safety net kicks in
+        assert was is True
+        assert filtered == "(action taken)"
 
     def test_wy_xianz_zuo_haishi_gaitian(self):
-        """要现在做还是改天？ as entire message → safety net returns original."""
+        """Pure permission-asking should collapse to a neutral action message."""
         text = "要现在做还是改天？"
         filtered, was = filter_permission_asking(text)
-        # Entire message is asking permission → safety net returns original
-        assert filtered == text  # safety net kicks in
+        assert was is True
+        assert filtered == "(action taken)"
 
     def test_chinese_preserves_other_content(self):
         """Non-asking Chinese text should be preserved."""
@@ -52,11 +52,11 @@ class TestEnglishPatterns:
     """Test English permission-asking pattern removal."""
 
     def test_should_I_do_this(self):
-        """'Should I do this?' as sole content → safety net returns original."""
+        """Pure permission-asking should collapse to a neutral action message."""
         text = "Should I do this?"
         filtered, was = filter_permission_asking(text)
-        # Entire message is asking permission → safety net returns original
-        assert filtered == text
+        assert was is True
+        assert filtered == "(action taken)"
 
     def test_should_I_do_this_with_context(self):
         """'Should I do this?' with context → ask removed, context preserved."""
@@ -72,6 +72,7 @@ class TestEnglishPatterns:
         text = "Do you want me to do this?"
         filtered, was = filter_permission_asking(text)
         assert was is True
+        assert filtered == "(action taken)"
 
     def test_would_you_like_me_to(self):
         """'Would you like me to continue?' with context → ask removed."""
@@ -140,13 +141,12 @@ class TestEdgeCases:
         filtered, was = filter_permission_asking("   ")
         assert was is False
 
-    def test_full_message_removal_returns_original(self):
-        """If filter would remove everything, return original."""
+    def test_full_message_removal_returns_neutral_message(self):
+        """If filter removes everything, return a neutral action message."""
         text = "Should I do this?"
         filtered, was = filter_permission_asking(text)
-        # Safety net: if everything is removed, return original
-        # (the function has this check)
-        assert filtered  # Should not be empty
+        assert was is True
+        assert filtered == "(action taken)"
 
     def test_mixed_language(self):
         """Mixed Chinese/English should work."""
