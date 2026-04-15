@@ -128,6 +128,7 @@ def circuit_breaker_snapshot() -> str:
             "had_stash": had_stash,
             "created_at": datetime.now(timezone.utc).isoformat(),
             "repo_path": str(repo),
+            "task_id": None,  # Set by caller if file cleanup on rollback is needed
         }
 
         state_path.write_text(json.dumps(state, indent=2, ensure_ascii=False) + "\n",
@@ -264,11 +265,26 @@ def circuit_breaker_rollback() -> str:
         state_path.write_text(json.dumps(state, indent=2, ensure_ascii=False) + "\n",
                                encoding="utf-8")
 
-    return tool_result({
+    # Clean up task output files associated with the snapshot's task_id
+    # (if any were created during the failed fix attempt)
+    cleaned = 0
+    _task_id = state.get("task_id") if isinstance(state, dict) else None
+    if _task_id:
+        try:
+            from tools.file_interface import cleanup_task_files
+            cleaned = cleanup_task_files(_task_id)
+        except Exception:
+            pass  # File cleanup is best-effort, must not block rollback
+
+    result = {
         "status": "ROLLED_BACK",
         "git_head": git_head[:12],
         "message": f"Rolled back to {git_head[:12]}. All changes since snapshot discarded.",
-    })
+    }
+    if cleaned:
+        result["task_files_cleaned"] = cleaned
+
+    return tool_result(result)
 
 
 def circuit_breaker_commit(message: str = "auto-fix: circuit breaker repair") -> str:

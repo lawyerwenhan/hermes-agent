@@ -93,14 +93,28 @@ def _build_child_system_prompt(
     *,
     workspace_path: Optional[str] = None,
 ) -> str:
-    """Build a focused system prompt for a child agent."""
+    """Build a focused system prompt for a child agent.
+    
+    If context contains a __hermes_file_ref key, the referenced file is
+    read and its content merged into the context — so large structured
+    data can be passed via files without bloating the caller's context.
+    """
+    # Resolve any file references in context before building the prompt
+    resolved_context = context
+    if context and context.strip():
+        try:
+            from tools.file_interface import resolve_file_refs
+            resolved_context = resolve_file_refs(context)
+        except Exception:
+            pass  # Fall back to raw context if file resolution fails
+
     parts = [
         "You are a focused subagent working on a specific delegated task.",
         "",
         f"YOUR TASK:\n{goal}",
     ]
-    if context and context.strip():
-        parts.append(f"\nCONTEXT:\n{context}")
+    if resolved_context and resolved_context.strip():
+        parts.append(f"\nCONTEXT:\n{resolved_context}")
     if workspace_path and str(workspace_path).strip():
         parts.append(
             "\nWORKSPACE PATH:\n"
