@@ -79,6 +79,11 @@ def log_terminal_command(
                 f.write(log_line)
     except Exception:
         # Silent failure - never let audit logging break the main flow
+        # Log audit system failures with warning level for better visibility
+        import logging
+        logging.getLogger("audit_logger").warning(
+            "log_terminal_command failed", exc_info=True
+        )
         pass
 
 
@@ -110,5 +115,10 @@ def log_file_write(
             with open(log_path, "a", encoding="utf-8") as f:
                 f.write(log_line)
     except Exception:
-        # Silent failure
+        # Silent failure - never let audit logging break the main flow
+        # Log audit system failures with warning level for better visibility
+        import logging
+        logging.getLogger("audit_logger").warning(
+            "log_file_write failed", exc_info=True
+        )
         pass

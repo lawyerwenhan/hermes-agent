@@ -97,8 +97,18 @@ def circuit_breaker_snapshot() -> str:
                         f"Snapshot already active (id={existing.get('snapshot_id','?')[:8]}). "
                         "Roll back or commit before creating a new snapshot."
                     )
+                # If status is not ACTIVE/COMMITTED/ROLLED_BACK, it's a corrupted state - block new snapshot
+                if existing.get("status") not in ("ACTIVE", "COMMITTED", "ROLLED_BACK"):
+                    return tool_error(
+                        f"Corrupted breaker state detected (status={existing.get('status','?')[:8]}). "
+                        "Manual reset required in ~/.hermes/health/breaker_state.json"
+                    )
             except (json.JSONDecodeError, KeyError):
-                pass
+                # Corrupted state file - block new snapshot for safety
+                return tool_error(
+                    "Corrupted breaker state file detected. "
+                    "Manual reset required in ~/.hermes/health/breaker_state.json"
+                )
 
         # Stash any uncommitted changes
         stash_result = subprocess.run(
@@ -273,8 +283,13 @@ def circuit_breaker_rollback() -> str:
         try:
             from tools.file_interface import cleanup_task_files
             cleaned = cleanup_task_files(_task_id)
-        except Exception:
-            pass  # File cleanup is best-effort, must not block rollback
+        except Exception as e:
+            # File cleanup is best-effort, must not block rollback
+            # but we log it for visibility
+            import logging
+            logging.getLogger("circuit_breaker").warning(
+                f"Task file cleanup failed for task_id={_task_id}: {e}"
+            )
 
     result = {
         "status": "ROLLED_BACK",
