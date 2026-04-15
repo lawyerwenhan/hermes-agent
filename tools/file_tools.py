@@ -7,7 +7,9 @@ import logging
 import os
 import threading
 from pathlib import Path
+from tools.audit_logger import log_file_write
 from tools.binary_extensions import has_binary_extension
+from tools.change_tracker import record_change, _hash_content
 from tools.file_operations import ShellFileOperations
 from agent.redact import redact_sensitive_text
 
@@ -580,6 +582,9 @@ def write_file_tool(path: str, content: str, task_id: str = "default") -> str:
         result_dict = result.to_dict()
         if stale_warning:
             result_dict["_warning"] = stale_warning
+        if not result_dict.get("error"):
+            record_change(path, operation="write_file", diff_text=content)
+            log_file_write(path=path, exit_code=result_dict.get("exit_code", 0))
         # Refresh the stored timestamp so consecutive writes by this
         # task don't trigger false staleness warnings.
         _update_read_timestamp(path, task_id)
@@ -639,6 +644,21 @@ def patch_tool(mode: str = "replace", path: str = None, old_string: str = None,
         if not result_dict.get("error"):
             for _p in _paths_to_check:
                 _update_read_timestamp(_p, task_id)
+            # Audit tracking: record successful patch changes
+            _changed = (
+                result_dict.get("files_modified", [])
+                + result_dict.get("files_created", [])
+                + result_dict.get("files_deleted", [])
+            ) or [path or "unknown"]
+            _diff_text = result_dict.get("diff", "")
+            _content_hash = _hash_content(_diff_text) if _diff_text else None
+            for _changed_path in _changed:
+                record_change(file_path=_changed_path, operation="patch", diff_text=_diff_text, content_hash=_content_hash)
+                log_file_write(path=_changed_path, exit_code=0, pattern=None, blocked=False)
+        else:
+            # Audit tracking: log failed patch attempt
+            for _p in _paths_to_check:
+                log_file_write(path=_p, exit_code=-1, pattern="patch_failed", blocked=True)
         result_json = json.dumps(result_dict, ensure_ascii=False)
         # Hint when old_string not found — saves iterations where the agent
         # retries with stale content instead of re-reading the file.

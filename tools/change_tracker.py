@@ -148,7 +148,11 @@ def _update_state_entry(file_path: str, change_type: str, diff_hash: str,
 
 def _mark_state_audited(files_audited: list, diff_hashes: list,
                          passport_id: str) -> int:
-    """Mark files as audited in the state file with interprocess locking. AND logic."""
+    """Mark files as audited in the state file with interprocess locking. AND logic.
+    
+    Checks both the state file (fast path) and the journal (fallback for
+    overwritten diff_hashes when the same file is modified multiple times).
+    """
     normalized_files = {_normalize_file_path(p): h for p, h in
                         zip(files_audited, diff_hashes)}
     state_lock = _get_audit_dir() / ".audit_state.lock"
@@ -157,10 +161,18 @@ def _mark_state_audited(files_audited: list, diff_hashes: list,
         fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
         try:
             state = _read_state()
+            # Build a journal lookup for diff_hashes that don't match state
+            journal_hashes = _build_journal_hash_lookup()
             for file_path, diff_hash in normalized_files.items():
                 entry = state["files"].get(file_path)
                 if entry and not entry.get("audited", False):
+                    # Fast path: state file diff_hash matches
                     if entry.get("diff_hash") == diff_hash:
+                        entry["audited"] = True
+                        entry["passport_id"] = passport_id
+                        updated += 1
+                    elif file_path in journal_hashes and diff_hash in journal_hashes[file_path]:
+                        # Fallback: diff_hash exists in journal for this file
                         entry["audited"] = True
                         entry["passport_id"] = passport_id
                         updated += 1
@@ -169,6 +181,35 @@ def _mark_state_audited(files_audited: list, diff_hashes: list,
         finally:
             fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
     return updated
+
+
+def _build_journal_hash_lookup() -> dict:
+    """Build a lookup of {normalized_file_path: set_of_diff_hashes} from the journal.
+    
+    Used by _mark_state_audited as a fallback when the state file's diff_hash
+    has been overwritten by a subsequent change to the same file.
+    """
+    lookup: dict[str, set[str]] = {}
+    changes_path = _get_changes_path()
+    if not changes_path.exists():
+        return lookup
+    try:
+        with open(changes_path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    entry = json.loads(line)
+                    file_path = _normalize_file_path(entry.get("file", ""))
+                    diff_hash = entry.get("diff_hash", "")
+                    if file_path and diff_hash:
+                        lookup.setdefault(file_path, set()).add(diff_hash)
+                except (json.JSONDecodeError, KeyError):
+                    continue
+    except Exception:
+        pass
+    return lookup
 
 
 # ---------------------------------------------------------------------------

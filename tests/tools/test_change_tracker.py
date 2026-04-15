@@ -5,7 +5,7 @@ import os
 from pathlib import Path
 
 from tools.audit_passport import is_change_audited, record_audit_passport
-from tools.change_tracker import mark_changes_audited, record_change
+from tools.change_tracker import mark_changes_audited, record_change, _read_state
 
 
 def _read_jsonl(path: Path) -> list[dict]:
@@ -30,11 +30,13 @@ def test_mark_changes_audited_requires_file_and_diff_hash(tmp_path, monkeypatch)
 
     assert updated == 1
 
-    changes = _read_jsonl(Path(os.environ["HERMES_HOME"]) / "audit" / "changes.jsonl")
-    audited = [entry for entry in changes if entry["audited"]]
-    assert len(audited) == 1
-    assert audited[0]["file"] == str(first_path.resolve())
-    assert audited[0]["diff_hash"] == "hash-a"
+    # Audit status is maintained in the state file (authoritative source).
+    # Journal is append-only; its audited field is set at creation time and never updated.
+    state = _read_state()
+    first_entry = state["files"].get(str(first_path.resolve()))
+    assert first_entry is not None, f"Expected state entry for {first_path.resolve()}, got: {list(state['files'].keys())}"
+    assert first_entry["audited"] is True
+    assert first_entry["passport_id"] == "passport-1"
 
 
 def test_audit_passport_path_checks_use_normalized_paths(tmp_path, monkeypatch):

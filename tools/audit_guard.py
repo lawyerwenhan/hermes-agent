@@ -139,9 +139,11 @@ def check_audit_requirement(command: str) -> Tuple[bool, Optional[str]]:
     try:
         from tools.change_tracker import get_unaudited_logic_changes
         unaudited = get_unaudited_logic_changes()
-    except Exception:
-        # If change_tracker is unavailable, allow through (fail open)
-        return True, None
+    except Exception as exc:
+        return False, (
+            "Audit check failed while evaluating commit safety: "
+            f"{type(exc).__name__}: {exc}. Commit blocked."
+        )
 
     if not unaudited:
         # No unaudited logic changes — approve

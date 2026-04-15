@@ -179,8 +179,8 @@ class TestPatchHandler:
         assert "Unknown mode" in result["error"]
 
     @patch("tools.file_tools._get_file_ops")
-    @patch("tools.change_tracker.record_change")
-    @patch("tools.audit_logger.log_file_write")
+    @patch("tools.file_tools.record_change")
+    @patch("tools.file_tools.log_file_write")
     def test_replace_mode_tracks_single_file_patch(self, mock_log, mock_record, mock_get):
         mock_ops = MagicMock()
         result_obj = MagicMock()
@@ -210,8 +210,8 @@ class TestPatchHandler:
         assert mock_record.call_args.kwargs["content_hash"]
 
     @patch("tools.file_tools._get_file_ops")
-    @patch("tools.change_tracker.record_change")
-    @patch("tools.audit_logger.log_file_write")
+    @patch("tools.file_tools.record_change")
+    @patch("tools.file_tools.log_file_write")
     def test_patch_mode_tracks_multi_file_patch(self, mock_log, mock_record, mock_get):
         mock_ops = MagicMock()
         result_obj = MagicMock()
@@ -259,8 +259,8 @@ class TestPatchHandler:
         assert "+++ /dev/null" in diff_text_by_path["old.py"]
 
     @patch("tools.file_tools._get_file_ops")
-    @patch("tools.change_tracker.record_change")
-    @patch("tools.audit_logger.log_file_write")
+    @patch("tools.file_tools.record_change")
+    @patch("tools.file_tools.log_file_write")
     def test_patch_failure_logs_blocked_without_tracking(self, mock_log, mock_record, mock_get):
         mock_ops = MagicMock()
         result_obj = MagicMock()

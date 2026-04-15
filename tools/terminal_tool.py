@@ -67,6 +67,8 @@ def ensure_minisweagent_on_path(_repo_root: Path | None = None) -> None:
 
 # Singularity helpers (scratch dir, SIF cache) now live in tools/environments/singularity.py
 from tools.environments.singularity import _get_scratch_dir
+from tools.audit_logger import log_terminal_command
+from tools.change_tracker import record_change
 from tools.tool_backend_helpers import (
     coerce_modal_mode,
     has_direct_modal_credentials,
@@ -80,6 +82,65 @@ FOREGROUND_MAX_TIMEOUT = int(os.getenv("TERMINAL_MAX_FOREGROUND_TIMEOUT", "600")
 
 # Disk usage warning threshold (in GB)
 DISK_USAGE_WARNING_THRESHOLD_GB = float(os.getenv("TERMINAL_DISK_WARNING_GB", "500"))
+
+
+# ---------------------------------------------------------------------------
+# Git-side-effect tracking helpers (monkeypatched in tests)
+# ---------------------------------------------------------------------------
+
+def _terminal_tracking_repo_root(cwd: str) -> Optional[Path]:
+    """Return the git repo root for *cwd*, or None if not inside a git repo."""
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            capture_output=True, text=True, cwd=cwd, timeout=5,
+        )
+        if result.returncode == 0:
+            return Path(result.stdout.strip())
+    except Exception:
+        pass
+    return None
+
+
+def _capture_git_porcelain(cwd: str) -> str:
+    """Return the output of ``git status --porcelain`` for *cwd*."""
+    try:
+        result = subprocess.run(
+            ["git", "status", "--porcelain"],
+            capture_output=True, text=True, cwd=cwd, timeout=5,
+        )
+        if result.returncode == 0:
+            return result.stdout
+    except Exception:
+        pass
+    return ""
+
+
+def _track_terminal_side_file_changes(**kwargs) -> None:
+    """Compare git state before/after a command and record changed files.
+
+    Accepted keyword arguments: *command*, *cwd*, *git_state_before*.
+    Runs ``git status --porcelain`` after the command, diffs against the
+    captured *git_state_before*, and calls ``record_change`` for each file
+    that appears newly changed.
+    """
+    command = kwargs.get("command", "")
+    cwd = kwargs.get("cwd", "")
+    git_state_before = kwargs.get("git_state_before", "")
+
+    git_state_after = _capture_git_porcelain(cwd)
+    if git_state_after == git_state_before:
+        return
+
+    lines_after = set(git_state_after.splitlines()) if git_state_after else set()
+    lines_before = set(git_state_before.splitlines()) if git_state_before else set()
+    new_lines = lines_after - lines_before
+
+    for line in new_lines:
+        # porcelain line format: XY filename  (strip the 2-char status + space)
+        filepath = line[3:] if len(line) > 3 else line.strip()
+        if filepath:
+            record_change(filepath, source="terminal", command=command)
 
 
 def _check_disk_usage_warning():
@@ -1449,6 +1510,7 @@ def terminal_tool(
                     proc_session.watch_patterns = list(watch_patterns)
                     result_data["watch_patterns"] = proc_session.watch_patterns
 
+                log_terminal_command(command, exit_code=result_data.get("exit_code", 0))
                 return json.dumps(result_data, ensure_ascii=False)
             except Exception as e:
                 return json.dumps({
@@ -1458,6 +1520,10 @@ def terminal_tool(
                 }, ensure_ascii=False)
         else:
             # Run foreground command with retry logic
+            # Capture git state before execution (for side-effect tracking)
+            git_root = _terminal_tracking_repo_root(cwd)
+            git_state_before = _capture_git_porcelain(cwd) if git_root else None
+
             max_retries = 3
             retry_count = 0
             result = None
@@ -1538,6 +1604,14 @@ def terminal_tool(
                 result_dict["approval"] = approval_note
             if exit_note:
                 result_dict["exit_code_meaning"] = exit_note
+
+            log_terminal_command(command, exit_code=returncode)
+
+            # Track git-detected file changes on success only
+            if returncode == 0 and git_root is not None and git_state_before is not None:
+                _track_terminal_side_file_changes(
+                    command=command, cwd=cwd, git_state_before=git_state_before,
+                )
 
             return json.dumps(result_dict, ensure_ascii=False)
 
