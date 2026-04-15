@@ -485,8 +485,66 @@ def _run_single_child(
     _heartbeat_thread = threading.Thread(target=_heartbeat_loop, daemon=True)
     _heartbeat_thread.start()
 
+    # Overall timeout for the child agent — prevents indefinite hangs
+    # from provider stalls, infinite retry loops, or tool hangs.
+    # Default: 10 minutes. Configurable via delegation.child_timeout_seconds.
     try:
-        result = child.run_conversation(user_message=goal)
+        from hermes_cli.config import load_config
+        _cfg = load_config()
+        _child_timeout = _cfg.get("delegation", {}).get("child_timeout_seconds", 600)
+    except Exception:
+        _child_timeout = 600
+
+    _timeout_expired = False
+    try:
+        # Run child in a separate thread so we can enforce a wall-clock timeout.
+        _child_result_box = [None]
+
+        def _run_child():
+            try:
+                _child_result_box[0] = child.run_conversation(user_message=goal)
+            except Exception as _exc:
+                _child_result_box[0] = {
+                    "final_response": "",
+                    "completed": False,
+                    "interrupted": False,
+                    "api_calls": 0,
+                    "error": str(_exc),
+                }
+
+        _child_thread = threading.Thread(target=_run_child, daemon=True)
+        _child_thread.start()
+        _child_thread.join(timeout=_child_timeout)
+
+        if _child_thread.is_alive():
+            # Child did not finish within timeout — treat as interrupted
+            logger.warning(
+                "[subagent-%d] timed out after %ds, treating as interrupted",
+                task_index, _child_timeout,
+            )
+            _timeout_expired = True
+            result = {
+                "final_response": "",
+                "completed": False,
+                "interrupted": True,
+                "api_calls": 0,
+                "error": f"Subagent timed out after {_child_timeout}s",
+            }
+            # Try to interrupt the child gracefully
+            try:
+                child.request_interrupt()
+            except Exception:
+                pass
+        else:
+            result = _child_result_box[0]
+            if result is None:
+                result = {
+                    "final_response": "",
+                    "completed": False,
+                    "interrupted": False,
+                    "api_calls": 0,
+                    "error": "Subagent returned None",
+                }
 
         # Flush any remaining batched progress to gateway
         if child_progress_cb and hasattr(child_progress_cb, '_flush'):
@@ -631,9 +689,18 @@ def _run_single_child(
         # Close tool resources (terminal sandboxes, browser daemons,
         # background processes, httpx clients) so subagent subprocesses
         # don't outlive the delegation.
+        # Use a timeout to prevent close() from blocking indefinitely
+        # (e.g., hung subprocess that won't respond to SIGTERM).
         try:
             if hasattr(child, 'close'):
-                child.close()
+                _close_thread = threading.Thread(target=child.close, daemon=True)
+                _close_thread.start()
+                _close_thread.join(timeout=10)
+                if _close_thread.is_alive():
+                    logger.warning(
+                        "[subagent-%d] child.close() did not finish in 10s, leaving daemon cleanup",
+                        task_index,
+                    )
         except Exception:
             logger.debug("Failed to close child agent after delegation")
 
@@ -767,44 +834,65 @@ def delegate_task(
                 )
                 futures[future] = i
 
-            for future in as_completed(futures):
-                try:
-                    entry = future.result()
-                except Exception as exc:
-                    idx = futures[future]
-                    entry = {
-                        "task_index": idx,
-                        "status": "error",
-                        "summary": None,
-                        "error": str(exc),
-                        "api_calls": 0,
-                        "duration_seconds": 0,
-                    }
-                results.append(entry)
-                completed_count += 1
-
-                # Print per-task completion line above the spinner
-                idx = entry["task_index"]
-                label = task_labels[idx] if idx < len(task_labels) else f"Task {idx}"
-                dur = entry.get("duration_seconds", 0)
-                status = entry.get("status", "?")
-                icon = "✓" if status == "completed" else "✗"
-                remaining = n_tasks - completed_count
-                completion_line = f"{icon} [{idx+1}/{n_tasks}] {label}  ({dur}s)"
-                if spinner_ref:
+            # Use per-child timeout from config (same as _run_single_child)
+            _batch_timeout = _child_timeout + 30  # extra 30s for cleanup overhead
+            try:
+                for future in as_completed(futures, timeout=_batch_timeout):
                     try:
-                        spinner_ref.print_above(completion_line)
-                    except Exception:
+                        entry = future.result()
+                    except Exception as exc:
+                        idx = futures[future]
+                        entry = {
+                            "task_index": idx,
+                            "status": "error",
+                            "summary": None,
+                            "error": str(exc),
+                            "api_calls": 0,
+                            "duration_seconds": 0,
+                        }
+                    results.append(entry)
+                    completed_count += 1
+
+                    # Print per-task completion line above the spinner
+                    idx = entry["task_index"]
+                    label = task_labels[idx] if idx < len(task_labels) else f"Task {idx}"
+                    dur = entry.get("duration_seconds", 0)
+                    status = entry.get("status", "?")
+                    icon = "✓" if status == "completed" else "✗"
+                    remaining = n_tasks - completed_count
+                    completion_line = f"{icon} [{idx+1}/{n_tasks}] {label}  ({dur}s)"
+                    if spinner_ref:
+                        try:
+                            spinner_ref.print_above(completion_line)
+                        except Exception:
+                            print(f"  {completion_line}")
+                    else:
                         print(f"  {completion_line}")
-                else:
-                    print(f"  {completion_line}")
 
-                # Update spinner text to show remaining count
-                if spinner_ref and remaining > 0:
-                    try:
-                        spinner_ref.update_text(f"🔀 {remaining} task{'s' if remaining != 1 else ''} remaining")
-                    except Exception as e:
-                        logger.debug("Spinner update_text failed: %s", e)
+                    # Update spinner text to show remaining count
+                    if spinner_ref and remaining > 0:
+                        try:
+                            spinner_ref.update_text(f"🔀 {remaining} task{'s' if remaining > 1 else ''} remaining")
+                        except Exception as e:
+                            logger.debug("Spinner update_text failed: %s", e)
+            except TimeoutError:
+                # One or more children did not finish within batch timeout
+                logger.warning(
+                    "Batch delegation timed out after %ds — %d/%d tasks completed",
+                    _batch_timeout, completed_count, n_tasks,
+                )
+                # Mark unfinished tasks as timed out
+                _completed_indices = {r["task_index"] for r in results}
+                for _idx in range(n_tasks):
+                    if _idx not in _completed_indices:
+                        results.append({
+                            "task_index": _idx,
+                            "status": "error",
+                            "summary": None,
+                            "error": f"Subagent timed out (batch timeout {_batch_timeout}s)",
+                            "api_calls": 0,
+                            "duration_seconds": _batch_timeout,
+                        })
 
         # Sort by task_index so results match input order
         results.sort(key=lambda r: r["task_index"])
