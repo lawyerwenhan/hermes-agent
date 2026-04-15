@@ -802,12 +802,30 @@ def delegate_task(
     # Build all child agents on the main thread (thread-safe construction)
     # Wrapped in try/finally so the global is always restored even if a
     # child build raises (otherwise _last_resolved_tool_names stays corrupted).
+    # Coding model override: when delegation.coding_model is configured,
+    # children with coding-heavy toolsets (terminal + file) use the coding
+    # model instead of the default delegation model for better code quality.
+    coding_model = str(cfg.get("coding_model") or "").strip() or None
+    _coding_toolset_keywords = frozenset({"terminal", "file"})
+
     children = []
     try:
         for i, t in enumerate(task_list):
+            # Determine which model to use for this child
+            child_model = creds["model"]
+            if coding_model and creds["provider"]:
+                child_toolsets = t.get("toolsets") or toolsets or []
+                # Use coding model when task has both terminal and file toolsets
+                # (code tasks need both to read and write), or when the goal
+                # looks code-related.
+                if isinstance(child_toolsets, list) and _coding_toolset_keywords.issubset(set(child_toolsets)):
+                    child_model = coding_model
+                elif isinstance(t.get("goal"), str) and any(kw in t["goal"].lower() for kw in ("fix", "debug", "code", "implement", "refactor", "bug", "error", "patch")):
+                    child_model = coding_model
+
             child = _build_child_agent(
                 task_index=i, goal=t["goal"], context=t.get("context"),
-                toolsets=t.get("toolsets") or toolsets, model=creds["model"],
+                toolsets=t.get("toolsets") or toolsets, model=child_model,
                 max_iterations=effective_max_iter, parent_agent=parent_agent,
                 override_provider=creds["provider"], override_base_url=creds["base_url"],
                 override_api_key=creds["api_key"],
