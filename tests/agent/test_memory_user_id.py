@@ -109,11 +109,10 @@ class TestMemoryManagerUserIdThreading:
         assert "user_id" not in p._init_kwargs
 
     def test_multiple_providers_all_receive_user_id(self):
-        from agent.builtin_memory_provider import BuiltinMemoryProvider
-
+        # BuiltinMemoryProvider was removed in commit 96c06001 (dead code cleanup).
+        # Use a second RecordingProvider to verify multiple providers all receive user_id.
         mgr = MemoryManager()
-        # Use builtin + one external (MemoryManager only allows one external)
-        builtin = BuiltinMemoryProvider()
+        builtin = RecordingProvider("builtin")
         ext = RecordingProvider("external")
         mgr.add_provider(builtin)
         mgr.add_provider(ext)
