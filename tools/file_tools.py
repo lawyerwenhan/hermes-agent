@@ -16,6 +16,55 @@ from agent.redact import redact_sensitive_text
 logger = logging.getLogger(__name__)
 
 
+# ---------------------------------------------------------------------------
+# Multi-write advisory: track per-session write counts to warn when
+# 2+ files are modified without a circuit_breaker snapshot.
+# ---------------------------------------------------------------------------
+
+_session_write_counts: dict = {}  # {session_id: {file_path: True}}
+_session_write_lock = threading.Lock()
+
+
+def _record_session_write(path: str, task_id: str = "default") -> None:
+    """Record a file write for multi-write advisory detection."""
+    session_key = task_id  # task_id serves as session identifier
+    with _session_write_lock:
+        if session_key not in _session_write_counts:
+            _session_write_counts[session_key] = {}
+        _session_write_counts[session_key][path] = True
+
+
+def _check_multi_write_advisory(task_id: str = "default") -> str | None:
+    """Return advisory message if 2+ files written in this session without
+    a circuit_breaker snapshot. Returns None if no advisory needed."""
+    session_key = task_id
+    with _session_write_lock:
+        writes = _session_write_counts.get(session_key, {})
+        if len(writes) < 2:
+            return None
+
+    # Check if there's an active circuit_breaker snapshot — if so, the
+    # multi-write is part of a structured fix flow, no advisory needed.
+    try:
+        from tools.circuit_breaker import _get_state_path
+        state_path = _get_state_path()
+        if state_path.exists():
+            import json as _json
+            state = _json.loads(state_path.read_text(encoding="utf-8"))
+            if state.get("status") == "ACTIVE":
+                return None
+    except Exception:
+        pass  # If we can't check breaker state, still show advisory
+
+    file_list = list(writes.keys())[:5]
+    return (
+        f"advisory: {len(writes)} files modified in this session "
+        f"without circuit_breaker snapshot. "
+        f"Consider circuit_breaker_snapshot() for safe rollback. "
+        f"Files: {', '.join(file_list)}"
+    )
+
+
 _EXPECTED_WRITE_ERRNOS = {errno.EACCES, errno.EPERM, errno.EROFS}
 
 # ---------------------------------------------------------------------------
@@ -585,9 +634,15 @@ def write_file_tool(path: str, content: str, task_id: str = "default") -> str:
         if not result_dict.get("error"):
             record_change(path, operation="write_file", diff_text=content)
             log_file_write(path=path, exit_code=result_dict.get("exit_code", 0))
+            _record_session_write(path, task_id)
         # Refresh the stored timestamp so consecutive writes by this
         # task don't trigger false staleness warnings.
         _update_read_timestamp(path, task_id)
+        # Multi-write advisory: warn if 2+ files without snapshot
+        if not result_dict.get("error"):
+            advisory = _check_multi_write_advisory(task_id)
+            if advisory:
+                result_dict["_advisory"] = advisory
         return json.dumps(result_dict, ensure_ascii=False)
     except Exception as e:
         if _is_expected_write_exception(e):
@@ -655,11 +710,18 @@ def patch_tool(mode: str = "replace", path: str = None, old_string: str = None,
             for _changed_path in _changed:
                 record_change(file_path=_changed_path, operation="patch", diff_text=_diff_text, content_hash=_content_hash)
                 log_file_write(path=_changed_path, exit_code=0, pattern=None, blocked=False)
+                _record_session_write(_changed_path, task_id)
         else:
             # Audit tracking: log failed patch attempt
             for _p in _paths_to_check:
                 log_file_write(path=_p, exit_code=-1, pattern="patch_failed", blocked=True)
         result_json = json.dumps(result_dict, ensure_ascii=False)
+        # Multi-write advisory on successful patch
+        if not result_dict.get("error"):
+            advisory = _check_multi_write_advisory(task_id)
+            if advisory:
+                result_dict["_advisory"] = advisory
+                result_json = json.dumps(result_dict, ensure_ascii=False)
         # Hint when old_string not found — saves iterations where the agent
         # retries with stale content instead of re-reading the file.
         if result_dict.get("error") and "Could not find" in str(result_dict["error"]):
