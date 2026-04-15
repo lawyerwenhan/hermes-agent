@@ -43,6 +43,7 @@ def _truncate_cmd(cmd: str, max_len: int = 500) -> str:
         .replace("\n", "\\n")
         .replace("\r", "\\r")
         .replace("\t", "\\t")
+        .replace("|", "\\|")
     )
     if len(cmd) <= max_len:
         return cmd
