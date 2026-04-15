@@ -48,7 +48,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
-from typing import Optional
+from typing import Dict, Optional
 
 def _require_tty(command_name: str) -> None:
     """Exit with a clear error if stdin is not a terminal.
@@ -3594,7 +3594,7 @@ def _load_installable_optional_extras() -> list[str]:
 def _install_python_dependencies_with_optional_fallback(
     install_cmd_prefix: list[str],
     *,
-    env: dict[str, str] | None = None,
+    env: Optional[Dict[str, str]] = None,
 ) -> None:
     """Install base deps plus as many optional extras as the environment supports."""
     try:

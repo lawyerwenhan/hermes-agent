@@ -16,6 +16,8 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
+from typing import Optional
+
 from hermes_cli.config import get_hermes_home, get_config_path, load_config, save_config
 from hermes_constants import get_optional_skills_dir
 from hermes_cli.setup import (
@@ -191,7 +193,7 @@ _WORKSPACE_STATE_GLOBS = (
 )
 
 
-def _find_migration_script() -> Path | None:
+def _find_migration_script() -> Optional[Path]:
     """Find the openclaw_to_hermes.py script in known locations."""
     for candidate in [_OPENCLAW_SCRIPT, _OPENCLAW_SCRIPT_INSTALLED]:
         if candidate.exists():
