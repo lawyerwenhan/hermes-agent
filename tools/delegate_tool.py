@@ -122,14 +122,17 @@ def _build_child_system_prompt(
             "Use this exact path for local repository/workdir operations unless the task explicitly says otherwise."
         )
     parts.append(
-        "\nComplete this task using the tools available to you. "
-        "When finished, provide a clear, concise summary of:\n"
-        "- What you did\n"
+        "\nComplete this task using the tools available to you.\n\n"
+        "OUTPUT FORMAT — end your response with this structure:\n"
+        "## Result\n"
+        "- What you did (concise)\n"
         "- What you found or accomplished\n"
-        "- Any files you created or modified\n"
-        "- Any issues encountered\n\n"
-        "Important workspace rule: Never assume a repository lives at /workspace/... or any other container-style path unless the task/context explicitly gives that path. "
-        "If no exact local path is provided, discover it first before issuing git/workdir-specific commands.\n\n"
+        "- Files created or modified (paths)\n"
+        "- Issues encountered (or 'None')\n\n"
+        "BOUNDARY RULES:\n"
+        "- Never assume a repository lives at /workspace/... or any container-style path unless the task/context explicitly gives that path. Discover it first.\n"
+        "- Stay within the task boundary. If you discover something that seems important but outside your task, note it as [BORDER-FINDING] and move on.\n"
+        "- Do not create files outside the workspace path unless the task requires it.\n\n"
         "Be thorough but concise -- your response is returned to the "
         "parent agent as a summary."
     )
@@ -997,6 +1000,9 @@ DELEGATE_TASK_SCHEMA = {
         "IMPORTANT:\n"
         "- Subagents have NO memory of your conversation. Pass all relevant "
         "info (file paths, error messages, constraints) via the 'context' field.\n"
+        "- Every delegate_task call MUST include: (1) clear goal, (2) context with "
+        "file paths/errors/constraints, (3) toolsets the subagent needs, "
+        "(4) task boundary — what the subagent should NOT do.\n"
         "- Subagents CANNOT call: delegate_task, clarify, memory, send_message, "
         "execute_code.\n"
         "- Each subagent gets its own terminal session (separate working directory and state).\n"
@@ -1008,17 +1014,22 @@ DELEGATE_TASK_SCHEMA = {
             "goal": {
                 "type": "string",
                 "description": (
-                    "What the subagent should accomplish. Be specific and "
-                    "self-contained -- the subagent knows nothing about your "
-                    "conversation history."
+                    "What the subagent should accomplish. One clear sentence. "
+                    "Must be self-contained — the subagent knows nothing about "
+                    "your conversation history. Example: 'Find and fix the "
+                    "Unicode decode error in tools/file_tools.py line 142'."
                 ),
             },
             "context": {
                 "type": "string",
                 "description": (
-                    "Background information the subagent needs: file paths, "
-                    "error messages, project structure, constraints. The more "
-                    "specific you are, the better the subagent performs."
+                    "Background information the subagent needs. Include ALL of "
+                    "these that apply: (1) file paths or code snippets, "
+                    "(2) error messages or stack traces, (3) project structure "
+                    "or relevant conventions, (4) boundaries — what the "
+                    "subagent should NOT do. Omit info only when truly irrelevant. "
+                    "For large structured data, write to a file and pass "
+                    "{\"__hermes_file_ref\": \"/path/to/file.json\"} instead."
                 ),
             },
             "toolsets": {
