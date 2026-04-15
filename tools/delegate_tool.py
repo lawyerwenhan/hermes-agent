@@ -391,6 +391,7 @@ def _build_child_agent(
         provider_sort=parent_agent.provider_sort,
         tool_progress_callback=child_progress_cb,
         iteration_budget=None,  # fresh budget per subagent
+        config=getattr(parent_agent, 'config', None),  # inherit compression config
     )
     child._print_fn = getattr(parent_agent, '_print_fn', None)
     # Set delegation depth so children can't spawn grandchildren
@@ -643,11 +644,20 @@ def _run_single_child(
     except Exception as exc:
         duration = round(time.monotonic() - child_start, 2)
         logging.exception(f"[subagent-{task_index}] failed")
+        # Provide a user-readable error summary, not just the raw exception
+        _error_msg = str(exc)
+        _user_hint = ""
+        if "no provider available" in _error_msg.lower() or "auxiliary" in _error_msg.lower():
+            _user_hint = " (No auxiliary model — context compression failed. Check OPENROUTER_API_KEY or set compression.summary_model in config.)"
+        elif "bad messages" in _error_msg.lower() or "invalid_request" in _error_msg.lower():
+            _user_hint = " (API rejected request — likely context too long or format error. Subagent may need a model with larger context or better compression.)"
+        elif "rate" in _error_msg.lower() or "429" in _error_msg:
+            _user_hint = " (Rate limited — too many concurrent requests to the same endpoint.)"
         return {
             "task_index": task_index,
             "status": "error",
             "summary": None,
-            "error": str(exc),
+            "error": _error_msg + _user_hint,
             "api_calls": 0,
             "duration_seconds": duration,
         }
