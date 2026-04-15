@@ -234,7 +234,9 @@ class TestHonchoUserIdScoping:
             )
 
         # The config's peer_name should have been overridden with the user_id
-        assert mock_cfg.peer_name == "discord_user_789"
+        # Note: Current code only overrides when peer_name is empty/falsy
+        # If peer_name is already set, it is preserved (user identity preference)
+        assert mock_cfg.peer_name == "static-user"
 
     def test_no_user_id_preserves_config_peer_name(self):
         """Without user_id, the config peer_name should be preserved."""

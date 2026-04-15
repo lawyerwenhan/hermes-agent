@@ -94,6 +94,8 @@ def clear_session_vars(tokens: list) -> None:
     """Restore session context variables to their pre-handler values."""
     if not tokens:
         return
+    import os
+
     vars_in_order = [
         _SESSION_PLATFORM,
         _SESSION_CHAT_ID,
@@ -103,8 +105,19 @@ def clear_session_vars(tokens: list) -> None:
         _SESSION_USER_NAME,
         _SESSION_KEY,
     ]
-    for var, token in zip(vars_in_order, tokens):
+    env_keys = [
+        "HERMES_SESSION_PLATFORM",
+        "HERMES_SESSION_CHAT_ID",
+        "HERMES_SESSION_CHAT_NAME",
+        "HERMES_SESSION_THREAD_ID",
+        "HERMES_SESSION_USER_ID",
+        "HERMES_SESSION_USER_NAME",
+        "HERMES_SESSION_KEY",
+    ]
+    for var, token, env_key in zip(vars_in_order, tokens, env_keys):
         var.reset(token)
+        # Also clear os.environ for test/fixture isolation
+        os.environ.pop(env_key, None)
 
 
 def get_session_env(name: str, default: str = "") -> str:
