@@ -161,6 +161,8 @@ def record_audit_passport(
 
         return passport_id
     except Exception:
+        import logging
+        logging.getLogger("audit_passport").error("Failed to record audit passport", exc_info=True)
         return passport_id
 
 
