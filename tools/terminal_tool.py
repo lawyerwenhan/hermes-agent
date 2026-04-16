@@ -140,7 +140,7 @@ def _track_terminal_side_file_changes(**kwargs) -> None:
         # porcelain line format: XY filename  (strip the 2-char status + space)
         filepath = line[3:] if len(line) > 3 else line.strip()
         if filepath:
-            record_change(filepath, source="terminal", command=command)
+            record_change(filepath, operation="terminal", diff_text=command)
 
 
 def _check_disk_usage_warning():
