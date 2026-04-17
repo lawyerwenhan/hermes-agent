@@ -21,6 +21,41 @@ from typing import Callable, Dict, List, Optional, Set
 logger = logging.getLogger(__name__)
 
 
+def _schema_required(schema: dict) -> List[str]:
+    """Return the list of required parameter names declared by a tool schema.
+
+    Supports both the canonical OpenAI function-calling format
+    (``{"parameters": {"required": [...]}}``) and the flatter variant
+    (``{"required": [...]}``). Returns ``[]`` when no required list
+    is declared or the schema is missing/invalid.
+    """
+    if not isinstance(schema, dict):
+        return []
+    params = schema.get("parameters")
+    if isinstance(params, dict):
+        req = params.get("required")
+        if isinstance(req, list):
+            return [str(r) for r in req]
+    req = schema.get("required")
+    if isinstance(req, list):
+        return [str(r) for r in req]
+    return []
+
+
+def _missing_required_fields(schema: dict, args: Optional[dict]) -> List[str]:
+    """Return the required-but-missing field names for a given schema/args.
+
+    A field counts as *missing* when it is not a key in ``args`` (``None``
+    values are preserved — the model may legitimately send ``null`` to
+    clear a field). ``args`` being ``None`` is treated as an empty dict.
+    """
+    required = _schema_required(schema)
+    if not required:
+        return []
+    present = set(args or {})
+    return [r for r in required if r not in present]
+
+
 class ToolEntry:
     """Metadata for a single registered tool."""
 
@@ -164,6 +199,9 @@ class ToolRegistry:
     def dispatch(self, name: str, args: dict, **kwargs) -> str:
         """Execute a tool handler by name.
 
+        * Required parameters declared in the tool's JSON schema are
+          validated up-front so handlers get a clear, actionable error
+          (rather than a cryptic ``KeyError`` deep inside the lambda).
         * Async handlers are bridged automatically via ``_run_async()``.
         * All exceptions are caught and returned as ``{"error": "..."}``
           for consistent error format.
@@ -171,6 +209,25 @@ class ToolRegistry:
         entry = self._tools.get(name)
         if not entry:
             return json.dumps({"error": f"Unknown tool: {name}"})
+
+        # Schema-level required-field validation (fail fast, model-friendly).
+        # Prevents cases where a model confuses similar tool APIs (e.g.
+        # `update_issue` vs `record_issue`) and drops a required field —
+        # without this, handlers would raise KeyError mid-execution.
+        missing = _missing_required_fields(entry.schema, args)
+        if missing:
+            required = _schema_required(entry.schema)
+            logger.warning(
+                "Tool %s missing required field(s): %s (got keys=%s, required=%s)",
+                name, missing, sorted((args or {}).keys()), required,
+            )
+            return json.dumps({
+                "error": (
+                    f"Missing required parameter(s) for {name}: "
+                    f"{', '.join(missing)}. Required: {required}."
+                )
+            }, ensure_ascii=False)
+
         try:
             if entry.is_async:
                 from model_tools import _run_async

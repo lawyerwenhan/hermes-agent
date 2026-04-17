@@ -309,3 +309,133 @@ class TestSecretCaptureResultContract:
             "validated": False,
         }
         assert "secret" not in json.dumps(result).lower()
+
+
+class TestRequiredFieldValidation:
+    """Regression for cron 3a3ae5204193 (2026-04-17): the model called
+    ``update_issue`` with ``record_issue``-style params (no ``issue_id``),
+    which reached the handler lambda and raised ``KeyError: 'issue_id'``.
+    Dispatch must now reject missing required fields up-front with a clear,
+    model-readable error, not a cryptic KeyError.
+    """
+
+    def _schema_with_required(self, name, required):
+        props = {r: {"type": "string"} for r in required}
+        return {
+            "name": name,
+            "description": f"A {name}",
+            "parameters": {
+                "type": "object",
+                "properties": props,
+                "required": list(required),
+            },
+        }
+
+    def test_missing_required_returns_clear_error_before_handler(self):
+        reg = ToolRegistry()
+        calls = {"count": 0}
+
+        def handler(args, **kw):
+            calls["count"] += 1
+            return json.dumps({"issue_id": args["issue_id"]})  # would KeyError
+
+        reg.register(
+            name="update_issue",
+            toolset="health",
+            schema=self._schema_with_required("update_issue", ["issue_id"]),
+            handler=handler,
+        )
+        # Model forgot issue_id — should short-circuit before handler runs.
+        result = json.loads(reg.dispatch("update_issue", {"status": "ESCALATED"}))
+        assert "error" in result
+        assert "issue_id" in result["error"]
+        assert "Missing required parameter" in result["error"]
+        assert calls["count"] == 0  # handler was NOT invoked
+
+    def test_all_required_present_runs_handler(self):
+        reg = ToolRegistry()
+        reg.register(
+            name="update_issue",
+            toolset="health",
+            schema=self._schema_with_required("update_issue", ["issue_id"]),
+            handler=lambda args, **kw: json.dumps({"got": args["issue_id"]}),
+        )
+        result = json.loads(reg.dispatch("update_issue", {"issue_id": "abc123"}))
+        assert result == {"got": "abc123"}
+
+    def test_multiple_missing_listed_in_error(self):
+        reg = ToolRegistry()
+        reg.register(
+            name="record_issue",
+            toolset="health",
+            schema=self._schema_with_required(
+                "record_issue",
+                ["file_path", "error_type", "severity", "description"],
+            ),
+            handler=lambda args, **kw: json.dumps({"ok": True}),
+        )
+        result = json.loads(reg.dispatch("record_issue", {"severity": "HIGH"}))
+        assert "error" in result
+        # The "Missing required parameter(s) for X: a, b, c." clause
+        # must list exactly the absent fields, not the provided one.
+        msg = result["error"]
+        missing_clause = msg.split("Required:")[0]
+        for field in ("file_path", "error_type", "description"):
+            assert field in missing_clause
+        assert "severity" not in missing_clause  # severity WAS provided
+
+    def test_no_required_list_allows_empty_args(self):
+        reg = ToolRegistry()
+        reg.register(
+            name="query_issues",
+            toolset="health",
+            schema={
+                "name": "query_issues",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"status": {"type": "string"}},
+                    "required": [],
+                },
+            },
+            handler=_dummy_handler,
+        )
+        result = json.loads(reg.dispatch("query_issues", {}))
+        assert result == {"ok": True}
+
+    def test_none_args_treated_as_empty(self):
+        reg = ToolRegistry()
+        reg.register(
+            name="update_issue",
+            toolset="health",
+            schema=self._schema_with_required("update_issue", ["issue_id"]),
+            handler=_dummy_handler,
+        )
+        result = json.loads(reg.dispatch("update_issue", None))
+        assert "error" in result
+        assert "issue_id" in result["error"]
+
+    def test_null_value_counts_as_present(self):
+        """Explicit null is the model's way of clearing a field — don't
+        reject it as 'missing'. Required only means the *key* must be sent."""
+        reg = ToolRegistry()
+        reg.register(
+            name="update_issue",
+            toolset="health",
+            schema=self._schema_with_required("update_issue", ["issue_id"]),
+            handler=lambda args, **kw: json.dumps({"issue_id": args["issue_id"]}),
+        )
+        result = json.loads(reg.dispatch("update_issue", {"issue_id": None}))
+        assert result == {"issue_id": None}
+
+    def test_schema_without_parameters_wrapper_supported(self):
+        """Tolerate the flat {'required': [...]} variant too."""
+        reg = ToolRegistry()
+        reg.register(
+            name="flat",
+            toolset="s",
+            schema={"name": "flat", "required": ["x"]},
+            handler=_dummy_handler,
+        )
+        result = json.loads(reg.dispatch("flat", {}))
+        assert "error" in result
+        assert "x" in result["error"]
