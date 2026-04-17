@@ -12,6 +12,13 @@ from agent.context_compressor import ContextCompressor
 def _make_compressor():
     """Create a ContextCompressor with minimal state for testing."""
     compressor = ContextCompressor.__new__(ContextCompressor)
+    # Runtime model attributes read by _generate_summary when building main_runtime.
+    # Must be seeded because __new__ bypasses __init__.
+    compressor.model = "test/model"
+    compressor.provider = ""
+    compressor.base_url = ""
+    compressor.api_key = ""
+    compressor.api_mode = ""
     compressor.protect_first_n = 2
     compressor.protect_last_n = 5
     compressor.tail_token_budget = 20000
