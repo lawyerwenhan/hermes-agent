@@ -56,6 +56,36 @@ def _is_git_commit_command(command: str) -> bool:
     if not tokens:
         return False
 
+    # Command substitution bypass detection
+    # Detect patterns like: bash -c "git commit", sh -c "git commit", eval "git commit"
+    # Also detect: $(echo git commit), `echo git commit`
+    for token in tokens:
+        lowered = token.lower()
+        # Detect bash/sh/zsh with -c flag (executes command string)
+        if lowered in ('bash', 'sh', 'zsh', 'dash', 'ksh'):
+            idx = tokens.index(token)
+            if idx + 1 < len(tokens) and tokens[idx + 1] == '-c':
+                # This is a shell execution with -c flag - potential bypass
+                # Verify if the command string after -c contains git commit
+                if idx + 2 < len(tokens):
+                    inner_cmd = tokens[idx + 2]
+                    if 'git' in inner_cmd and 'commit' in inner_cmd:
+                        return True
+                return False
+        # Detect eval command
+        if lowered == 'eval':
+            idx = tokens.index(token)
+            if idx + 1 < len(tokens):
+                inner_cmd = tokens[idx + 1]
+                if 'git' in inner_cmd and 'commit' in inner_cmd:
+                    return True
+            return False
+        # Detect $() or backtick command substitution markers
+        if '$(' in token or '`' in token:
+            # Potential command substitution - contains git commit?
+            if 'git' in token and 'commit' in token:
+                return True
+
     index = _consume_env_prefix(tokens, 0)
     if index >= len(tokens) or tokens[index] != "git":
         return False

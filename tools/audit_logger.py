@@ -99,16 +99,14 @@ def log_file_write(
     Args:
         path: The file path being written
         exit_code: Exit code (0 for success, -1 for blocked/pre-flight fail, etc.)
-        pattern: Pattern ID if blocked by pre-flight
-        blocked: Whether the write was blocked
+        pattern: Pattern ID if blocked by pre-flight or approval system
+        blocked: Whether the file write was blocked
     """
     try:
         timestamp = _get_timestamp()
-        safe_path = _truncate_cmd(path)
         pattern_str = _truncate_cmd(pattern) if pattern else "-"
-
         blocked_str = "yes" if blocked else "no"
-        log_line = f"{timestamp} | write: {safe_path} | exit: {exit_code} | pattern: {pattern_str} | blocked: {blocked_str}\n"
+        log_line = f"{timestamp} | file_write: {path} | exit: {exit_code} | pattern: {pattern_str} | blocked: {blocked_str}\n"
 
         log_path = _get_audit_log_path()
         with _write_lock:
@@ -121,4 +119,3 @@ def log_file_write(
         logging.getLogger("audit_logger").warning(
             "log_file_write failed", exc_info=True
         )
-        pass

@@ -318,40 +318,57 @@ def record_change(
 
         diff_hash = content_hash or "unknown"
 
-        # 1. Append to journal FIRST (append-only, can't roll back state without journal)
+        # Atomic journal + state update under single interprocess lock
+        # Race condition fix: journal and state must be updated atomically
         changes_path = _get_changes_path()
-        with _write_lock:
-            lock_path = _get_changes_lock_path()
-            with open(lock_path, "a+", encoding="utf-8") as lock_file:
-                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
-                try:
-                    prev_hash = _compute_prev_hash(changes_path)
-                    entry = {
-                        "timestamp": _get_timestamp(),
-                        "file": file_path,
-                        "operation": operation,
-                        "change_type": change_type,
-                        "diff_hash": diff_hash,
-                        "prev_hash": prev_hash,
-                        "audited": False,
-                        "passport_id": None,
-                    }
-                    _append_change_entry(changes_path, entry)
-                finally:
-                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+        state_lock = _get_audit_dir() / ".audit_state.lock"
+        lock_path = _get_changes_lock_path()
 
-        # 2. Update state file AFTER journal write succeeds
-        # If state write fails, journal still has the record — rebuild can recover
-        _update_state_entry(
-            file_path=file_path,
-            change_type=change_type,
-            diff_hash=diff_hash,
-            operation=operation,
-            audited=False,
-        )
+        with _write_lock:
+            # Acquire both locks in consistent order to prevent deadlock
+            with open(state_lock, "a+", encoding="utf-8") as state_lock_file:
+                fcntl.flock(state_lock_file.fileno(), fcntl.LOCK_EX)
+                try:
+                    with open(lock_path, "a+", encoding="utf-8") as lock_file:
+                        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+                        try:
+                            # 1. Append to journal FIRST
+                            prev_hash = _compute_prev_hash(changes_path)
+                            entry = {
+                                "timestamp": _get_timestamp(),
+                                "file": file_path,
+                                "operation": operation,
+                                "change_type": change_type,
+                                "diff_hash": diff_hash,
+                                "prev_hash": prev_hash,
+                                "audited": False,
+                                "passport_id": None,
+                            }
+                            _append_change_entry(changes_path, entry)
+
+                            # 2. Update state atomically within same lock scope
+                            state = _read_state()
+                            state["files"][file_path] = {
+                                "change_type": change_type,
+                                "diff_hash": diff_hash or "unknown",
+                                "operation": operation,
+                                "audited": False,
+                                "passport_id": None,
+                                "last_modified": _get_timestamp(),
+                            }
+                            _write_state(state)
+                        finally:
+                            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+                finally:
+                    fcntl.flock(state_lock_file.fileno(), fcntl.LOCK_UN
+)
     except Exception:
         # Never let tracking break file operations
-        pass
+        # Log failure for debugging but don't propagate
+        import logging
+        logging.getLogger("change_tracker").debug(
+            "record_change failed for %s", file_path, exc_info=True
+        )
 
 
 def get_unaudited_logic_changes() -> list:

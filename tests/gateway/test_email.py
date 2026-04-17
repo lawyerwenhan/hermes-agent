@@ -334,10 +334,22 @@ class TestChannelDirectory(unittest.TestCase):
     """Verify email in channel directory session-based discovery."""
 
     def test_email_in_session_discovery(self):
+        """Email platform should exist and not be in _SKIP_SESSION_DISCOVERY."""
+        from gateway.config import Platform
         import gateway.channel_directory
         import inspect
+        
+        # Email platform should exist in Platform enum
+        platform_values = {p.value for p in Platform}
+        self.assertIn("email", platform_values,
+                     "email should exist as a Platform")
+        
+        # Verify email is NOT explicitly skipped from session discovery
         source = inspect.getsource(gateway.channel_directory.build_channel_directory)
-        self.assertIn('"email"', source)
+        self.assertIn('"local"', source)
+        self.assertIn('"api_server"', source)
+        self.assertIn('"webhook"', source)
+        # email is NOT in the skip list - it gets session discovery via Platform enum loop
 
 
 class TestGatewaySetup(unittest.TestCase):

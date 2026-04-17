@@ -135,7 +135,8 @@ def get_session_env(name: str, default: str = "") -> str:
     var = _VAR_MAP.get(name)
     if var is not None:
         value = var.get()
-        if value:
+        # Fast path: contextvar set (even if empty string) takes precedence
+        if value is not None:
             return value
     # Fall back to os.environ for CLI, cron, and test compatibility
     return os.getenv(name, default)
