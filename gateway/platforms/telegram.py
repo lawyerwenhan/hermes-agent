@@ -112,6 +112,150 @@ def _strip_mdv2(text: str) -> str:
     return cleaned
 
 
+# ── Telegram send rate limiting ────────────────────────────────────────────
+# Telegram Bot API limits:
+#   - 30 messages/second globally (per bot)
+#   - 1 message/second/chat for private chats
+#   - 20 messages/minute per group chat
+# Cron jobs fire at the same wall-clock minute, which bursts sends and trips
+# FloodWaitError (observed 2026-04-17 00:15 with 53-69s back-offs).  The
+# proxy below serialises sends per-chat with a floor of 1.1s between
+# outgoing calls, and caps global send rate at ~2 msg/s — comfortably under
+# the official 30 msg/s cap while still avoiding the per-chat flood trigger.
+
+_TELEGRAM_PER_CHAT_MIN_INTERVAL_S = float(
+    os.getenv("HERMES_TELEGRAM_PER_CHAT_MIN_INTERVAL_S", "1.1")
+)
+_TELEGRAM_GLOBAL_MIN_INTERVAL_S = float(
+    os.getenv("HERMES_TELEGRAM_GLOBAL_MIN_INTERVAL_S", "0.5")
+)
+_TELEGRAM_RATE_LIMIT_LOG_COOLDOWN_S = 60.0
+
+
+class _ThrottledBot:
+    """Async proxy around python-telegram-bot ``Bot`` that throttles send_*.
+
+    Wraps only outbound ``send_*``/``edit_*`` methods that hit the Bot API
+    send surface (``send_message``, ``send_photo``, ``send_video``,
+    ``send_animation``, ``send_audio``, ``send_voice``, ``send_document``,
+    ``send_chat_action``, ``edit_message_text``, ``edit_message_media``,
+    ``edit_message_reply_markup``, ``send_media_group``).  All other
+    attribute access (e.g. ``get_me``, ``delete_message``, ``get_updates``)
+    passes straight through to the wrapped bot.
+
+    Throttling strategy:
+      * Global interval gate — at least ``_TELEGRAM_GLOBAL_MIN_INTERVAL_S``
+        between any two outbound sends (protects against the 30 msg/s cap).
+      * Per-chat interval gate — at least
+        ``_TELEGRAM_PER_CHAT_MIN_INTERVAL_S`` between two sends to the same
+        chat (protects against the 1 msg/s/chat cap that actually triggers
+        FloodWaitError in practice).
+
+    Kept deliberately simple: no task queue, no bucket refill maths — just
+    two monotonic clocks + an ``asyncio.Lock`` per chat.  Matches Telegram's
+    published limits for a single-bot deployment and avoids introducing new
+    race surfaces.
+    """
+
+    # Method names that hit the send-message rate limit.  Each kwarg set
+    # must expose ``chat_id`` so we can key the per-chat lock.
+    _THROTTLED_METHODS = frozenset({
+        "send_message",
+        "send_photo",
+        "send_video",
+        "send_animation",
+        "send_audio",
+        "send_voice",
+        "send_document",
+        "send_media_group",
+        "send_chat_action",
+        "edit_message_text",
+        "edit_message_media",
+        "edit_message_reply_markup",
+        "edit_message_caption",
+    })
+
+    def __init__(self, bot: Any, adapter_name: str = "telegram") -> None:
+        self._bot = bot
+        self._adapter_name = adapter_name
+        self._global_lock = asyncio.Lock()
+        self._global_last_send: float = 0.0
+        self._chat_locks: Dict[str, asyncio.Lock] = {}
+        self._chat_last_send: Dict[str, float] = {}
+        self._last_warn_time: float = 0.0
+
+    def __getattr__(self, name: str):
+        # __getattr__ only runs when the attribute is NOT found on self,
+        # so our explicit _THROTTLED_METHODS handling via __getattribute__
+        # below takes precedence.
+        return getattr(self._bot, name)
+
+    def __getattribute__(self, name: str):
+        # Intercept throttled send_*/edit_* calls; pass everything else
+        # through so properties like ``token``, ``id``, coroutine helpers
+        # such as ``get_me``/``get_updates``, and non-send utilities
+        # (``delete_message``, ``answer_callback_query``) behave exactly
+        # like the raw bot.
+        if name.startswith("_") or name in (
+            "__class__", "__dict__", "__getattr__", "__getattribute__",
+        ):
+            return object.__getattribute__(self, name)
+        throttled = object.__getattribute__(self, "_THROTTLED_METHODS")
+        if name in throttled:
+            method = getattr(object.__getattribute__(self, "_bot"), name)
+            return object.__getattribute__(self, "_wrap_throttled")(name, method)
+        return getattr(object.__getattribute__(self, "_bot"), name)
+
+    def _wrap_throttled(self, method_name: str, method):
+        async def _throttled(*args, **kwargs):
+            chat_key = str(kwargs.get("chat_id", "")) or ""
+            await self._acquire_slot(chat_key)
+            return await method(*args, **kwargs)
+        _throttled.__name__ = method_name
+        _throttled.__qualname__ = f"_ThrottledBot.{method_name}"
+        return _throttled
+
+    async def _acquire_slot(self, chat_key: str) -> None:
+        loop = asyncio.get_event_loop()
+
+        # ── Per-chat gate ─────────────────────────────────────────────
+        if chat_key:
+            lock = self._chat_locks.get(chat_key)
+            if lock is None:
+                lock = asyncio.Lock()
+                self._chat_locks[chat_key] = lock
+            await lock.acquire()
+            try:
+                prev = self._chat_last_send.get(chat_key, 0.0)
+                delta = loop.time() - prev
+                if delta < _TELEGRAM_PER_CHAT_MIN_INTERVAL_S:
+                    wait = _TELEGRAM_PER_CHAT_MIN_INTERVAL_S - delta
+                    self._maybe_warn(chat_key, wait, scope="chat")
+                    await asyncio.sleep(wait)
+                self._chat_last_send[chat_key] = loop.time()
+            finally:
+                lock.release()
+
+        # ── Global gate ───────────────────────────────────────────────
+        async with self._global_lock:
+            delta = loop.time() - self._global_last_send
+            if delta < _TELEGRAM_GLOBAL_MIN_INTERVAL_S:
+                wait = _TELEGRAM_GLOBAL_MIN_INTERVAL_S - delta
+                self._maybe_warn("*", wait, scope="global")
+                await asyncio.sleep(wait)
+            self._global_last_send = loop.time()
+
+    def _maybe_warn(self, key: str, wait: float, scope: str) -> None:
+        now = asyncio.get_event_loop().time()
+        if now - self._last_warn_time < _TELEGRAM_RATE_LIMIT_LOG_COOLDOWN_S:
+            return
+        self._last_warn_time = now
+        logger.debug(
+            "[%s] rate-limited telegram send (%s=%s, waiting %.2fs)",
+            self._adapter_name, scope, key or "?", wait,
+        )
+
+
 class TelegramAdapter(BasePlatformAdapter):
     """
     Telegram bot adapter.
@@ -579,7 +723,12 @@ class TelegramAdapter(BasePlatformAdapter):
 
             builder = builder.request(request).get_updates_request(get_updates_request)
             self._app = builder.build()
-            self._bot = self._app.bot
+            # Wrap the raw PTB Bot in a rate-limit proxy so every send_*/edit_*
+            # call is serialised per-chat and globally.  See _ThrottledBot for
+            # the throttling strategy.  The proxy transparently forwards every
+            # other attribute, so existing callers (self._bot.get_me(), etc.)
+            # continue to work unchanged.
+            self._bot = _ThrottledBot(self._app.bot, adapter_name=self.name)
             
             # Register handlers
             self._app.add_handler(TelegramMessageHandler(
