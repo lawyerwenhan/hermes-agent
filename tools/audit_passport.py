@@ -8,6 +8,13 @@ This passport is then checked by audit_guard.py before allowing git commit
 of logic changes.
 """
 
+# Path fix for cron/standalone runs - ensure hermes-agent root is importable
+import sys
+from pathlib import Path
+HERMES_AGENT_ROOT = Path(__file__).parent.parent
+if str(HERMES_AGENT_ROOT) not in sys.path:
+    sys.path.insert(0, str(HERMES_AGENT_ROOT))
+
 import json
 import hmac
 import hashlib

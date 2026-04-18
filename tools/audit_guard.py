@@ -8,6 +8,13 @@ blocks the commit and provides instructions for running the audit.
 Trivial changes (docs, comments, whitespace) are auto-passed.
 """
 
+# Path fix for cron/standalone runs - ensure hermes-agent root is importable
+import sys
+from pathlib import Path
+HERMES_AGENT_ROOT = Path(__file__).parent.parent
+if str(HERMES_AGENT_ROOT) not in sys.path:
+    sys.path.insert(0, str(HERMES_AGENT_ROOT))
+
 import json
 import shlex
 from typing import Optional, Tuple
