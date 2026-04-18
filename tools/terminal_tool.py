@@ -30,6 +30,13 @@ Usage:
     result = terminal_tool("python server.py", background=True)
 """
 
+# Path fix for cron/standalone runs - ensure hermes-agent root is importable
+import sys
+from pathlib import Path
+HERMES_AGENT_ROOT = Path(__file__).parent.parent
+if str(HERMES_AGENT_ROOT) not in sys.path:
+    sys.path.insert(0, str(HERMES_AGENT_ROOT))
+
 import importlib.util
 import json
 import logging
@@ -140,7 +147,7 @@ def _track_terminal_side_file_changes(**kwargs) -> None:
         # porcelain line format: XY filename  (strip the 2-char status + space)
         filepath = line[3:] if len(line) > 3 else line.strip()
         if filepath:
-            record_change(filepath, operation="terminal", diff_text=command)
+            record_change(filepath, operation="terminal", diff_text=command, source="terminal")
 
 
 def _check_disk_usage_warning():

@@ -296,6 +296,7 @@ def record_change(
     operation: str,
     diff_text: str = "",
     content_hash: Optional[str] = None,
+    source: Optional[str] = None,
 ) -> None:
     """
     Record a file change: update state file (O(1) reads) AND append to journal.
@@ -305,6 +306,9 @@ def record_change(
         operation: Type of operation ('write_file', 'patch', 'git_commit', 'terminal_command')
         diff_text: Diff text for classification (empty string = unknown)
         content_hash: Optional hash of file content for verification
+        source: Optional caller tag identifying the originating tool/hook
+            (e.g. 'terminal', 'write_file', 'patch'). Recorded in both the
+            journal entry and state file for forensic attribution.
     """
     try:
         # Normalize path to avoid duplicate entries
@@ -343,6 +347,7 @@ def record_change(
                                 "prev_hash": prev_hash,
                                 "audited": False,
                                 "passport_id": None,
+                                "source": source,
                             }
                             _append_change_entry(changes_path, entry)
 
@@ -355,6 +360,7 @@ def record_change(
                                 "audited": False,
                                 "passport_id": None,
                                 "last_modified": _get_timestamp(),
+                                "source": source,
                             }
                             _write_state(state)
                         finally:

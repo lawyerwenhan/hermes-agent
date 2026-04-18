@@ -632,7 +632,7 @@ def write_file_tool(path: str, content: str, task_id: str = "default") -> str:
         if stale_warning:
             result_dict["_warning"] = stale_warning
         if not result_dict.get("error"):
-            record_change(path, operation="write_file", diff_text=content)
+            record_change(path, operation="write_file", diff_text=content, source="write_file")
             log_file_write(path=path, exit_code=result_dict.get("exit_code", 0))
             _record_session_write(path, task_id)
         # Refresh the stored timestamp so consecutive writes by this
@@ -708,7 +708,7 @@ def patch_tool(mode: str = "replace", path: str = None, old_string: str = None,
             _diff_text = result_dict.get("diff", "")
             _content_hash = _hash_content(_diff_text) if _diff_text else None
             for _changed_path in _changed:
-                record_change(file_path=_changed_path, operation="patch", diff_text=_diff_text, content_hash=_content_hash)
+                record_change(file_path=_changed_path, operation="patch", diff_text=_diff_text, content_hash=_content_hash, source="patch")
                 log_file_write(path=_changed_path, exit_code=0, pattern=None, blocked=False)
                 _record_session_write(_changed_path, task_id)
         else:
