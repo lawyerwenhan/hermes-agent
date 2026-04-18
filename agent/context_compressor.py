@@ -526,7 +526,19 @@ The user has requested that this compaction PRIORITISE preserving all informatio
                             "for %d seconds.",
                             _SUMMARY_FAILURE_COOLDOWN_SECONDS)
             return None
+        except (AttributeError, TypeError):
+            # Programming error (e.g. missing attribute, wrong kwargs) — not a
+            # runtime LLM failure. Surface it instead of silently triggering the
+            # cooldown, which masked a 5-day bug where ContextCompressor.model
+            # was missing and every compaction was swallowed as "LLM failed".
+            logging.exception(
+                "Context compressor internal error (programming bug, "
+                "not runtime) — re-raising so it is visible"
+            )
+            raise
         except Exception as e:
+            # True runtime failure (network, timeout, provider error). Cooldown
+            # is appropriate so we don't hammer a broken provider.
             self._summary_failure_cooldown_until = time.monotonic() + _SUMMARY_FAILURE_COOLDOWN_SECONDS
             logging.warning(
                 "Failed to generate context summary: %s. "
