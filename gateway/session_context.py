@@ -50,6 +50,16 @@ _SESSION_USER_ID: ContextVar[str] = ContextVar("HERMES_SESSION_USER_ID", default
 _SESSION_USER_NAME: ContextVar[str] = ContextVar("HERMES_SESSION_USER_NAME", default="")
 _SESSION_KEY: ContextVar[str] = ContextVar("HERMES_SESSION_KEY", default="")
 
+_VAR_ORDER = [
+    _SESSION_PLATFORM,
+    _SESSION_CHAT_ID,
+    _SESSION_CHAT_NAME,
+    _SESSION_THREAD_ID,
+    _SESSION_USER_ID,
+    _SESSION_USER_NAME,
+    _SESSION_KEY,
+]
+
 _VAR_MAP = {
     "HERMES_SESSION_PLATFORM": _SESSION_PLATFORM,
     "HERMES_SESSION_CHAT_ID": _SESSION_CHAT_ID,
@@ -94,30 +104,12 @@ def clear_session_vars(tokens: list) -> None:
     """Restore session context variables to their pre-handler values."""
     if not tokens:
         return
-    import os
 
-    vars_in_order = [
-        _SESSION_PLATFORM,
-        _SESSION_CHAT_ID,
-        _SESSION_CHAT_NAME,
-        _SESSION_THREAD_ID,
-        _SESSION_USER_ID,
-        _SESSION_USER_NAME,
-        _SESSION_KEY,
-    ]
-    env_keys = [
-        "HERMES_SESSION_PLATFORM",
-        "HERMES_SESSION_CHAT_ID",
-        "HERMES_SESSION_CHAT_NAME",
-        "HERMES_SESSION_THREAD_ID",
-        "HERMES_SESSION_USER_ID",
-        "HERMES_SESSION_USER_NAME",
-        "HERMES_SESSION_KEY",
-    ]
-    for var, token, env_key in zip(vars_in_order, tokens, env_keys):
+    for var, token in zip(_VAR_ORDER, tokens):
         var.reset(token)
-        # Also clear os.environ for test/fixture isolation
-        os.environ.pop(env_key, None)
+    # Note: We do NOT touch os.environ here. ContextVars are session-scoped;
+    # os.environ is process-scoped. Mixing them is a scope conflation bug.
+    # Test isolation should use monkeypatch, not rely on production code cleanup.
 
 
 def get_session_env(name: str, default: str = "") -> str:

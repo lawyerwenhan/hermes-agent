@@ -169,14 +169,17 @@ def test_session_key_falls_back_to_os_environ(monkeypatch):
     assert get_session_env("HERMES_SESSION_KEY") == "env-session-123"
 
 
-def test_set_session_env_includes_session_key():
-    """_set_session_env should propagate session_key from SessionContext."""
+def test_set_session_env_includes_session_key(monkeypatch):
+    """_set_session_env should include the session_key in context."""
+    # Ensure clean isolation - clear env var to test pure contextvar behavior
+    monkeypatch.delenv("HERMES_SESSION_KEY", raising=False)
+
     runner = object.__new__(GatewayRunner)
     source = SessionSource(
         platform=Platform.TELEGRAM,
         chat_id="-1001",
-        chat_name="Group",
-        chat_type="group",
+        chat_name="Test Chat",
+        chat_type="private",
         thread_id="17585",
     )
     context = SessionContext(
@@ -192,7 +195,7 @@ def test_set_session_env_includes_session_key():
     assert get_session_env("HERMES_SESSION_KEY") == ""
 
 
-def test_session_key_no_race_condition_with_contextvars(monkeypatch):
+def test_session_key_isolation_async(monkeypatch):
     """Prove contextvars isolates SESSION_KEY across concurrent async tasks.
 
     Two tasks set different session keys. With contextvars each task
