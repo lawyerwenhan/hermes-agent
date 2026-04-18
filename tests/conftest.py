@@ -1,7 +1,18 @@
-"""Shared fixtures for the hermes-agent test suite."""
+"""Shared fixtures for the hermes-agent test suite.
+
+IMPORTANT: the module-level block below runs before pytest collects
+any tests (and before any test module is imported), so modules that
+cache ``HERMES_HOME`` at import time (e.g. ``run_agent._hermes_home``
+and the logger wired up by ``hermes_logging.setup_logging``) resolve
+the tmp path instead of writing to the real ``~/.hermes/logs/`` —
+which is what caused pytest runs to dump hundreds of fixture-induced
+ERROR lines into production ``errors.log``.
+"""
 
 import asyncio
+import atexit
 import os
+import shutil
 import signal
 import sys
 import tempfile
@@ -16,9 +27,42 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 
+# ─── Session-wide HERMES_HOME isolation ────────────────────────────────────
+# Done at *module import time* (before any test module is collected) so
+# that modules which snapshot ``HERMES_HOME`` / ``get_hermes_home()`` at
+# import time (e.g. ``run_agent._hermes_home``) and loggers that wire up
+# ``errors.log`` via ``hermes_logging.setup_logging`` cannot leak writes
+# to the real ``~/.hermes/logs/errors.log`` on the host.
+#
+# Each pytest-xdist worker process re-runs this block, which is the
+# correct behaviour — every worker gets its own isolated fake home.
+_SESSION_FAKE_HOME = Path(tempfile.mkdtemp(prefix="hermes-pytest-home-"))
+for _sub in ("sessions", "cron", "memories", "skills", "logs", "plugins"):
+    (_SESSION_FAKE_HOME / _sub).mkdir(parents=True, exist_ok=True)
+os.environ["HERMES_HOME"] = str(_SESSION_FAKE_HOME)
+
+# Best-effort cleanup on interpreter exit. Not critical — ``tempfile``
+# dirs are under /tmp and cleaned by the OS — but keeps runs tidy.
+@atexit.register
+def _cleanup_session_fake_home() -> None:
+    try:
+        shutil.rmtree(_SESSION_FAKE_HOME, ignore_errors=True)
+    except Exception:
+        pass
+
+
 @pytest.fixture(autouse=True)
 def _isolate_hermes_home(tmp_path, monkeypatch):
-    """Redirect HERMES_HOME to a temp dir so tests never write to ~/.hermes/."""
+    """Redirect HERMES_HOME to a per-test temp dir so tests never write to ~/.hermes/.
+
+    Note: a *session-wide* fake ``HERMES_HOME`` is already installed at
+    conftest import time (see module-level block above). This fixture
+    additionally narrows the scope to a per-test tmp dir so tests that
+    inspect ``HERMES_HOME``-rooted files see a clean slate. Module-level
+    caches (``run_agent._hermes_home``, logging handlers) stay bound to
+    the session-wide fake home — which is still outside ``~/.hermes/``
+    so the production ``errors.log`` is safe either way.
+    """
     fake_home = tmp_path / "hermes_test"
     fake_home.mkdir()
     (fake_home / "sessions").mkdir()
