@@ -70,3 +70,7 @@ website/static/api/skills-index.json
 
 # Runtime audit state (generated, not source)
 audit/
+
+# local Claude Code state (not part of hermes-agent source)
+.claude/
+CLAUDE.md
